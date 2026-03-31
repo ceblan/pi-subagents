@@ -8,6 +8,16 @@ interface SubagentParamsSchema {
 			enum?: string[];
 			description?: string;
 		};
+		tasks?: {
+			items?: {
+				properties?: {
+					count?: {
+						minimum?: number;
+						description?: string;
+					};
+				};
+			};
+		};
 	};
 }
 
@@ -28,5 +38,12 @@ describe("SubagentParams schema", { skip: !available ? "typebox not available" :
 		assert.deepEqual(contextSchema.enum, ["fresh", "fork"]);
 		assert.match(String(contextSchema.description ?? ""), /fresh/);
 		assert.match(String(contextSchema.description ?? ""), /fork/);
+	});
+
+	it("includes count on top-level parallel tasks", () => {
+		const taskCountSchema = SubagentParams?.properties?.tasks?.items?.properties?.count;
+		assert.ok(taskCountSchema, "tasks[].count schema should exist");
+		assert.equal(taskCountSchema.minimum, 1);
+		assert.match(String(taskCountSchema.description ?? ""), /repeat/i);
 	});
 });

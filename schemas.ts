@@ -11,6 +11,7 @@ export const TaskItem = Type.Object({
 	agent: Type.String(), 
 	task: Type.String(), 
 	cwd: Type.Optional(Type.String()),
+	count: Type.Optional(Type.Integer({ minimum: 1, description: "Repeat this parallel task N times with the same settings." })),
 	model: Type.Optional(Type.String({ description: "Override model for this task (e.g. 'google/gemini-3-pro')" })),
 	skill: Type.Optional(SkillOverride),
 });
@@ -34,6 +35,7 @@ export const ParallelTaskSchema = Type.Object({
 	agent: Type.String(),
 	task: Type.Optional(Type.String({ description: "Task template with {task}, {previous}, {chain_dir} variables. Defaults to {previous}." })),
 	cwd: Type.Optional(Type.String()),
+	count: Type.Optional(Type.Integer({ minimum: 1, description: "Repeat this parallel task N times with the same settings." })),
 	output: Type.Optional(Type.Any({ description: "Output filename to write in {chain_dir} (string), or false to disable file output" })),
 	reads: Type.Optional(Type.Any({ description: "Files to read from {chain_dir} before running (array of filenames), or false to disable" })),
 	progress: Type.Optional(Type.Boolean({ description: "Enable progress.md tracking in {chain_dir}" })),
@@ -46,6 +48,9 @@ export const ParallelStepSchema = Type.Object({
 	parallel: Type.Array(ParallelTaskSchema, { minItems: 1, description: "Tasks to run in parallel" }),
 	concurrency: Type.Optional(Type.Number({ description: "Max concurrent tasks (default: 4)" })),
 	failFast: Type.Optional(Type.Boolean({ description: "Stop on first failure (default: false)" })),
+	worktree: Type.Optional(Type.Boolean({
+		description: "Create isolated git worktrees for each parallel task."
+	})),
 });
 
 // Chain item can be either sequential or parallel
@@ -67,7 +72,12 @@ export const SubagentParams = Type.Object({
 	config: Type.Optional(Type.Any({
 		description: "Agent or chain config for create/update. Agent: name, description, scope ('user'|'project', default 'user'), systemPrompt, model, tools (comma-separated), extensions (comma-separated), skills (comma-separated), thinking, output, reads, progress. Chain: name, description, scope, steps (array of {agent, task?, output?, reads?, model?, skills?, progress?}). Presence of 'steps' creates a chain instead of an agent."
 	})),
-	tasks: Type.Optional(Type.Array(TaskItem, { description: "PARALLEL mode: [{agent, task}, ...]" })),
+	tasks: Type.Optional(Type.Array(TaskItem, { description: "PARALLEL mode: [{agent, task, count?}, ...]" })),
+	worktree: Type.Optional(Type.Boolean({
+		description: "Create isolated git worktrees for each parallel task. " +
+			"Prevents filesystem conflicts. Requires clean git state. " +
+			"Per-worktree diffs included in output."
+	})),
 	chain: Type.Optional(Type.Array(ChainItem, { description: "CHAIN mode: sequential pipeline where each step's response becomes {previous} for the next. Use {task}, {previous}, {chain_dir} in task templates." })),
 	context: Type.Optional(Type.String({
 		enum: ["fresh", "fork"],

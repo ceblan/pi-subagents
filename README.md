@@ -300,6 +300,7 @@ Chains can be created from the Agents Manager template picker ("Blank Chain"), o
 - **Agent Templates**: Create agents from presets (Scout, Planner, Implementer, Code Reviewer, Blank Chain)
 - **Skill Injection**: Agents declare skills in frontmatter; skills get injected into system prompts
 - **Parallel-in-Chain**: Fan-out/fan-in patterns with `{ parallel: [...] }` steps within chains
+- **Worktree Isolation**: `worktree: true` gives each parallel agent its own git worktree, preventing filesystem conflicts during concurrent execution
 - **Chain Clarification TUI**: Interactive preview/edit of chain templates and behaviors before execution
 - **Agent Frontmatter Extensions**: Agents declare default chain behavior (`output`, `defaultReads`, `defaultProgress`, `skill`)
 - **Chain Artifacts**: Shared directory at `<tmpdir>/pi-chain-runs/{runId}/` for inter-step files
@@ -442,6 +443,9 @@ These are the parameters the **LLM agent** passes when it calls the `subagent` t
 // Parallel
 { tasks: [{ agent: "scout", task: "a" }, { agent: "scout", task: "b" }] }
 
+// Parallel with count shorthand (run the same task 3 times)
+{ tasks: [{ agent: "scout", task: "audit auth", count: 3 }] }
+
 // Parallel with forked context (each task gets its own isolated fork)
 { tasks: [{ agent: "scout", task: "audit frontend" }, { agent: "reviewer", task: "audit backend" }], context: "fork" }
 
@@ -472,7 +476,7 @@ These are the parameters the **LLM agent** passes when it calls the `subagent` t
 { chain: [
   { agent: "scout", task: "Gather context for the codebase" },
   { parallel: [
-    { agent: "worker", task: "Implement auth based on {previous}" },
+    { agent: "worker", task: "Implement auth based on {previous}", count: 2 },
     { agent: "worker", task: "Implement API based on {previous}" }
   ]},
   { agent: "reviewer", task: "Review all changes from {previous}" }
@@ -486,6 +490,22 @@ These are the parameters the **LLM agent** passes when it calls the `subagent` t
     { agent: "worker", task: "Refactor module B" },
     { agent: "worker", task: "Refactor module C" }
   ], concurrency: 2, failFast: true }  // limit concurrency, stop on first failure
+]}
+
+// Worktree isolation — each parallel agent gets its own git worktree
+{ tasks: [
+  { agent: "worker", task: "Implement auth" },
+  { agent: "worker", task: "Implement API" }
+], worktree: true }
+
+// Worktree isolation in a chain (fan-out with isolation, fan-in for review)
+{ chain: [
+  { agent: "scout", task: "Gather context" },
+  { parallel: [
+    { agent: "worker", task: "Implement feature A based on {previous}" },
+    { agent: "worker", task: "Implement feature B based on {previous}" }
+  ], worktree: true },
+  { agent: "reviewer", task: "Review changes from {previous}" }
 ]}
 
 // Async chain with parallel step (runs in background)
@@ -578,7 +598,8 @@ Notes:
 | `output` | `string \| false` | agent default | Override output file for single agent (absolute path as-is, relative path resolved against cwd) |
 | `skill` | `string \| string[] \| false` | agent default | Override skills (comma-separated string, array, or false to disable) |
 | `model` | string | agent default | Override model for single agent |
-| `tasks` | `{agent, task, cwd?, skill?}[]` | - | Parallel tasks (sync only) |
+| `tasks` | `{agent, task, cwd?, count?, skill?}[]` | - | Parallel tasks. Foreground runs directly; background requests are converted to an equivalent chain. `count` repeats one task entry N times with the same settings. |
+| `worktree` | boolean | false | Create isolated git worktrees for each parallel task. Requires clean git state. Per-worktree diffs included in output. |
 | `chain` | ChainItem[] | - | Sequential steps with behavior overrides (see below) |
 | `context` | `"fresh" \| "fork"` | `fresh` | Execution context mode. `fork` uses a real branched session from the parent's current leaf for each child run |
 | `chainDir` | string | `<tmpdir>/pi-chain-runs/` | Persistent directory for chain artifacts (default auto-cleaned after 24h) |
@@ -616,6 +637,7 @@ Notes:
 | `parallel` | ParallelTask[] | required | Array of tasks to run concurrently |
 | `concurrency` | number | 4 | Max concurrent tasks |
 | `failFast` | boolean | false | Stop remaining tasks on first failure |
+| `worktree` | boolean | false | Create isolated git worktrees for each parallel task |
 
 *ParallelTask fields:* (same as sequential step)
 
@@ -624,6 +646,7 @@ Notes:
 | `agent` | string | required | Agent name |
 | `task` | string | `{previous}` | Task template |
 | `cwd` | string | - | Override working directory |
+| `count` | number | 1 | Repeat this parallel task N times with the same settings |
 | `output` | `string \| false` | agent default | Override output (namespaced to parallel-N/M-agent/) |
 | `reads` | `string[] \| false` | agent default | Override files to read |
 | `progress` | boolean | agent default | Override progress tracking |
@@ -635,6 +658,47 @@ Status tool:
 | Tool | Description |
 |------|-------------|
 | `subagent_status` | Inspect async run status by id or dir |
+
+## Worktree Isolation
+
+When multiple agents run in parallel against the same repo, they can clobber each other's file changes. Pass `worktree: true` to give each parallel agent its own git worktree branched from HEAD.
+
+```typescript
+// Top-level parallel with worktree isolation
+{ tasks: [
+  { agent: "worker", task: "Implement auth", count: 2 },
+  { agent: "worker", task: "Implement API" }
+], worktree: true }
+
+// Chain with worktree-isolated parallel step
+{ chain: [
+  { agent: "scout", task: "Gather context" },
+  { parallel: [
+    { agent: "worker", task: "Implement feature A based on {previous}" },
+    { agent: "worker", task: "Implement feature B based on {previous}" }
+  ], worktree: true },
+  { agent: "reviewer", task: "Review all changes from {previous}" }
+]}
+```
+
+After the parallel step completes, per-agent diff stats are appended to the output (and become `{previous}` for the next chain step). Full patch files are written to disk. The caller or next step can decide what to keep.
+
+**Requirements:**
+
+- Must be inside a git repository
+- Working tree must be clean (no uncommitted changes) — commit or stash first
+- `node_modules/` is symlinked into each worktree to avoid reinstalling
+- Worktree runs use the shared parallel/step `cwd`. Task-level `cwd` overrides must be omitted or match that shared `cwd`; if you need different working directories, disable `worktree` or split the run.
+
+**What happens under the hood:**
+
+1. `git worktree add` creates a temporary worktree per agent in `<tmpdir>/pi-worktree-*`
+2. Each agent runs in its worktree's cwd (preserving subdirectory context)
+3. After execution, `git add -A && git diff --cached` captures all changes (committed, modified, and new files)
+4. Diff stats appear in the aggregated output; full `.patch` files are written to the artifacts directory
+5. Worktrees and temp branches are cleaned up in a `finally` block
+
+If you use [pi-prompt-template-model](https://github.com/nicobailon/pi-prompt-template-model), worktree isolation is also available via `worktree: true` in chain template frontmatter or the `--worktree` CLI flag on `chain-prompts`.
 
 ## Chain Variables
 
@@ -808,6 +872,8 @@ Async events:
 ├── types.ts                      # Shared types and constants
 ├── subagent-runner.ts            # Async runner (detached process)
 ├── parallel-utils.ts             # Parallel execution utilities for async runner
+├── worktree.ts                   # Git worktree isolation for parallel execution
+├── worktree.test.ts              # Worktree module tests
 ├── pi-spawn.ts                   # Cross-platform pi CLI spawning
 ├── single-output.ts              # Solo agent output file handling
 ├── notify.ts                     # Async completion notifications

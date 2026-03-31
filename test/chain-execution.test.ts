@@ -339,6 +339,28 @@ describe("chain execution — parallel steps", { skip: !available ? "pi packages
 		assert.ok(result.isError, "chain should fail when parallel step fails");
 	});
 
+	it("rejects worktree parallel steps that set a different task cwd", async () => {
+		const agents = [makeAgent("a"), makeAgent("b")];
+		const result = await executeChain(
+			makeChainParams(
+				[
+					{
+						parallel: [
+							{ agent: "a", task: "Task A" },
+							{ agent: "b", task: "Task B", cwd: path.join(tempDir, "other") },
+						],
+						worktree: true,
+					},
+				],
+				agents,
+			),
+		);
+
+		assert.ok(result.isError, "chain should reject conflicting task cwd under worktree");
+		assert.match(result.content[0]?.text ?? "", /worktree isolation uses the shared cwd/i);
+		assert.match(result.content[0]?.text ?? "", /task 2 \(b\) sets cwd/i);
+	});
+
 	it("sequential → parallel → sequential (mixed chain)", async () => {
 		mockPi.onCall({ output: "Step complete" });
 		const agents = [makeAgent("scout"), makeAgent("rev-a"), makeAgent("rev-b"), makeAgent("writer")];

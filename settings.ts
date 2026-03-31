@@ -52,6 +52,7 @@ export interface ParallelTaskItem {
 	agent: string;
 	task?: string;
 	cwd?: string;
+	count?: number;
 	output?: string | false;
 	reads?: string[] | false;
 	progress?: boolean;
@@ -64,6 +65,7 @@ export interface ParallelStep {
 	parallel: ParallelTaskItem[];
 	concurrency?: number;
 	failFast?: boolean;
+	worktree?: boolean;
 }
 
 /** Union type for chain steps */

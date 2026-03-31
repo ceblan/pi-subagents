@@ -280,7 +280,7 @@ describe("prompt-template delegation bridge", () => {
 
 	it("accepts tasks payloads and emits parallelResults", async () => {
 		const events = new FakeEvents();
-		let executeTasks: Array<{ agent: string; task: string; model?: string }> | undefined;
+		let executeTasks: Array<{ agent: string; task: string; model?: string; cwd?: string }> | undefined;
 		const bridge = registerPromptTemplateDelegationBridge({
 			events,
 			getContext: () => ({ cwd: "/repo" }),
@@ -301,8 +301,8 @@ describe("prompt-template delegation bridge", () => {
 		events.emit(PROMPT_TEMPLATE_SUBAGENT_REQUEST_EVENT, {
 			requestId: "r6",
 			tasks: [
-				{ agent: "worker-a", task: "A", model: "openai/gpt-5" },
-				{ agent: "worker-b", task: "B", model: "anthropic/claude-sonnet-4-20250514" },
+				{ agent: "worker-a", task: "A", model: "openai/gpt-5", cwd: "/repo/a" },
+				{ agent: "worker-b", task: "B", model: "anthropic/claude-sonnet-4-20250514", cwd: "/repo/b" },
 			],
 			context: "fresh",
 			model: "openai/gpt-5",
@@ -317,6 +317,8 @@ describe("prompt-template delegation bridge", () => {
 		assert.equal(executeTasks?.length, 2);
 		assert.equal(executeTasks?.[0]?.model, "openai/gpt-5");
 		assert.equal(executeTasks?.[1]?.model, "anthropic/claude-sonnet-4-20250514");
+		assert.equal(executeTasks?.[0]?.cwd, "/repo/a");
+		assert.equal(executeTasks?.[1]?.cwd, "/repo/b");
 		assert.equal(response.isError, false);
 		assert.equal(response.parallelResults?.[0]?.agent, "worker-a");
 		assert.equal(response.parallelResults?.[0]?.isError, false);

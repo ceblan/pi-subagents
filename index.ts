@@ -209,6 +209,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 						tasks: request.tasks,
 						context: request.context,
 						cwd: request.cwd,
+						worktree: request.worktree,
 						async: false,
 						clarify: false,
 					},
@@ -235,6 +236,14 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		},
 	});
 
+	function effectiveParallelTaskCount(tasks: Array<{ count?: unknown }> | undefined): number {
+		if (!tasks || tasks.length === 0) return 0;
+		return tasks.reduce((total, task) => {
+			const count = typeof task.count === "number" && Number.isInteger(task.count) && task.count >= 1 ? task.count : 1;
+			return total + count;
+		}, 0);
+	}
+
 	const tool: ToolDefinition<typeof SubagentParams, Details> = {
 		name: "subagent",
 		label: "Subagent",
@@ -242,8 +251,8 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 
 EXECUTION (use exactly ONE mode):
 • SINGLE: { agent, task } - one task
-• CHAIN: { chain: [{agent:"scout"}, {agent:"planner"}] } - sequential pipeline
-• PARALLEL: { tasks: [{agent,task}, ...] } - concurrent execution
+• CHAIN: { chain: [{agent:"scout"}, {parallel:[{agent:"worker",count:3}]}] } - sequential pipeline with optional parallel fan-out
+• PARALLEL: { tasks: [{agent,task,count?}, ...], worktree?: true } - concurrent execution (worktree: isolate each task in a git worktree)
 • Optional context: { context: "fresh" | "fork" } (default: "fresh")
 
 CHAIN TEMPLATE VARIABLES (use in task strings):
@@ -275,6 +284,7 @@ MANAGEMENT (use action field, omit agent/task/chain/tasks):
 				);
 			}
 			const isParallel = (args.tasks?.length ?? 0) > 0;
+			const parallelCount = effectiveParallelTaskCount(args.tasks as Array<{ count?: unknown }> | undefined);
 			const asyncLabel = args.async === true && !isParallel ? theme.fg("warning", " [async]") : "";
 			if (args.chain?.length)
 				return new Text(
@@ -284,7 +294,7 @@ MANAGEMENT (use action field, omit agent/task/chain/tasks):
 				);
 			if (isParallel)
 				return new Text(
-					`${theme.fg("toolTitle", theme.bold("subagent "))}parallel (${args.tasks!.length})`,
+					`${theme.fg("toolTitle", theme.bold("subagent "))}parallel (${parallelCount})`,
 					0,
 					0,
 				);

@@ -22,6 +22,7 @@ import {
 	type ChainStep,
 	type SequentialStep,
 	type ParallelTaskResult,
+	type ResolvedStepBehavior,
 	type ResolvedTemplates,
 } from "./settings.js";
 import { discoverAvailableSkills, normalizeSkillInput } from "./skills.js";
@@ -29,6 +30,15 @@ import { runSync } from "./execution.js";
 import { buildChainSummary } from "./formatters.js";
 import { getFinalOutput, mapConcurrent } from "./utils.js";
 import { recordRun } from "./run-history.js";
+import {
+	cleanupWorktrees,
+	createWorktrees,
+	diffWorktrees,
+	findWorktreeTaskCwdConflict,
+	formatWorktreeDiffSummary,
+	formatWorktreeTaskCwdConflict,
+	type WorktreeSetup,
+} from "./worktree.js";
 import {
 	type AgentProgress,
 	type ArtifactConfig,
@@ -41,23 +51,191 @@ import {
 /** Resolve a model name to its full provider/model format */
 function resolveModelFullId(modelName: string | undefined, availableModels: ModelInfo[]): string | undefined {
 	if (!modelName) return undefined;
-	// If already in provider/model format, return as-is
 	if (modelName.includes("/")) return modelName;
-	
-	// Handle thinking level suffixes (e.g., "claude-sonnet-4-5:high")
-	// Strip the suffix for lookup, then add it back
+
 	const colonIdx = modelName.lastIndexOf(":");
 	const baseModel = colonIdx !== -1 ? modelName.substring(0, colonIdx) : modelName;
 	const thinkingSuffix = colonIdx !== -1 ? modelName.substring(colonIdx) : "";
-	
-	// Look up base model in available models to find provider
-	const match = availableModels.find(m => m.id === baseModel);
+
+	const match = availableModels.find((m) => m.id === baseModel);
 	if (match) {
 		return thinkingSuffix ? `${match.fullId}${thinkingSuffix}` : match.fullId;
 	}
-	
-	// Fallback: return as-is
+
 	return modelName;
+}
+
+interface ChainExecutionDetailsInput {
+	results: SingleResult[];
+	includeProgress?: boolean;
+	allProgress: AgentProgress[];
+	allArtifactPaths: ArtifactPaths[];
+	artifactsDir: string;
+	chainAgents: string[];
+	totalSteps: number;
+	currentStepIndex?: number;
+}
+
+interface ParallelChainRunInput {
+	step: Exclude<ChainStep, SequentialStep>;
+	parallelTemplates: string[];
+	parallelBehaviors: ResolvedStepBehavior[];
+	agents: AgentConfig[];
+	stepIndex: number;
+	availableModels: ModelInfo[];
+	chainDir: string;
+	prev: string;
+	originalTask: string;
+	ctx: ExtensionContext;
+	cwd?: string;
+	runId: string;
+	globalTaskIndex: number;
+	sessionDirForIndex: (idx?: number) => string | undefined;
+	sessionFileForIndex?: (idx?: number) => string | undefined;
+	shareEnabled: boolean;
+	artifactConfig: ArtifactConfig;
+	artifactsDir: string;
+	signal?: AbortSignal;
+	onUpdate?: (r: AgentToolResult<Details>) => void;
+	results: SingleResult[];
+	allProgress: AgentProgress[];
+	chainAgents: string[];
+	totalSteps: number;
+	worktreeSetup?: WorktreeSetup;
+}
+
+function buildChainExecutionDetails(input: ChainExecutionDetailsInput): Details {
+	return {
+		mode: "chain",
+		results: input.results,
+		progress: input.includeProgress ? input.allProgress : undefined,
+		artifacts: input.allArtifactPaths.length ? { dir: input.artifactsDir, files: input.allArtifactPaths } : undefined,
+		chainAgents: input.chainAgents,
+		totalSteps: input.totalSteps,
+		currentStepIndex: input.currentStepIndex,
+	};
+}
+
+function buildChainExecutionErrorResult(message: string, input: ChainExecutionDetailsInput): ChainExecutionResult {
+	return {
+		content: [{ type: "text", text: message }],
+		isError: true,
+		details: buildChainExecutionDetails(input),
+	};
+}
+
+function ensureParallelProgressFile(
+	chainDir: string,
+	progressCreated: boolean,
+	parallelBehaviors: ResolvedStepBehavior[],
+): boolean {
+	if (progressCreated || !parallelBehaviors.some((behavior) => behavior.progress)) {
+		return progressCreated;
+	}
+	const progressPath = path.join(chainDir, "progress.md");
+	fs.writeFileSync(progressPath, "# Progress\n\n## Status\nIn Progress\n\n## Tasks\n\n## Files Changed\n\n## Notes\n");
+	return true;
+}
+
+function appendParallelWorktreeSummary(
+	output: string,
+	worktreeSetup: WorktreeSetup | undefined,
+	diffsDir: string,
+	agents: string[],
+): string {
+	if (!worktreeSetup) return output;
+	const diffs = diffWorktrees(worktreeSetup, agents, diffsDir);
+	const diffSummary = formatWorktreeDiffSummary(diffs);
+	if (!diffSummary) return output;
+	return `${output}\n\n${diffSummary}`;
+}
+
+async function runParallelChainTasks(input: ParallelChainRunInput): Promise<SingleResult[]> {
+	const concurrency = input.step.concurrency ?? MAX_CONCURRENCY;
+	const failFast = input.step.failFast ?? false;
+	let aborted = false;
+
+	const parallelResults = await mapConcurrent(
+		input.step.parallel,
+		concurrency,
+		async (task, taskIndex) => {
+			if (aborted && failFast) {
+				return {
+					agent: task.agent,
+					task: "(skipped)",
+					exitCode: -1,
+					messages: [],
+					usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 },
+					error: "Skipped due to fail-fast",
+				} as SingleResult;
+			}
+
+			const behavior = input.parallelBehaviors[taskIndex]!;
+			const taskTemplate = input.parallelTemplates[taskIndex] ?? "{previous}";
+			const templateHasPrevious = taskTemplate.includes("{previous}");
+			const { prefix, suffix } = buildChainInstructions(
+				behavior,
+				input.chainDir,
+				false,
+				templateHasPrevious ? undefined : input.prev,
+			);
+
+			let taskStr = taskTemplate;
+			taskStr = taskStr.replace(/\{task\}/g, input.originalTask);
+			taskStr = taskStr.replace(/\{previous\}/g, input.prev);
+			taskStr = taskStr.replace(/\{chain_dir\}/g, input.chainDir);
+			const cleanTask = taskStr;
+			taskStr = prefix + taskStr + suffix;
+
+			const taskAgentConfig = input.agents.find((agent) => agent.name === task.agent);
+			const effectiveModel =
+				(task.model ? resolveModelFullId(task.model, input.availableModels) : null)
+				?? resolveModelFullId(taskAgentConfig?.model, input.availableModels);
+
+			const taskCwd = input.worktreeSetup
+				? input.worktreeSetup.worktrees[taskIndex]!.agentCwd
+				: (task.cwd ?? input.cwd);
+
+			const result = await runSync(input.ctx.cwd, input.agents, task.agent, taskStr, {
+				cwd: taskCwd,
+				signal: input.signal,
+				runId: input.runId,
+				index: input.globalTaskIndex + taskIndex,
+				sessionDir: input.sessionDirForIndex(input.globalTaskIndex + taskIndex),
+				sessionFile: input.sessionFileForIndex?.(input.globalTaskIndex + taskIndex),
+				share: input.shareEnabled,
+				artifactsDir: input.artifactConfig.enabled ? input.artifactsDir : undefined,
+				artifactConfig: input.artifactConfig,
+				modelOverride: effectiveModel,
+				skills: behavior.skills === false ? [] : behavior.skills,
+				onUpdate: input.onUpdate
+					? (progressUpdate) => {
+							const stepResults = progressUpdate.details?.results || [];
+							const stepProgress = progressUpdate.details?.progress || [];
+							input.onUpdate?.({
+								...progressUpdate,
+								details: {
+									mode: "chain",
+									results: input.results.concat(stepResults),
+									progress: input.allProgress.concat(stepProgress),
+									chainAgents: input.chainAgents,
+									totalSteps: input.totalSteps,
+									currentStepIndex: input.stepIndex,
+								},
+							});
+						}
+					: undefined,
+			});
+
+			if (result.exitCode !== 0 && failFast) {
+				aborted = true;
+			}
+			recordRun(task.agent, cleanTask, result.exitCode, result.progressSummary?.durationMs ?? 0);
+			return result;
+		},
+	);
+
+	return parallelResults;
 }
 
 export interface ChainExecutionParams {
@@ -259,172 +437,137 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 		const stepTemplates = templates[stepIndex]!;
 
 		if (isParallelStep(step)) {
-			// === PARALLEL STEP EXECUTION ===
 			const parallelTemplates = stepTemplates as string[];
-			const concurrency = step.concurrency ?? MAX_CONCURRENCY;
-			const failFast = step.failFast ?? false;
-
-			// Create subdirectories for parallel outputs
-			const agentNames = step.parallel.map((t) => t.agent);
-			createParallelDirs(chainDir, stepIndex, step.parallel.length, agentNames);
-
-			// Resolve behaviors for parallel tasks
-			const parallelBehaviors = resolveParallelBehaviors(step.parallel, agents, stepIndex, chainSkills);
-
-			// If any parallel task has progress enabled and progress.md hasn't been created,
-			// create it now to avoid race conditions
-			const anyNeedsProgress = parallelBehaviors.some((b) => b.progress);
-			if (anyNeedsProgress && !progressCreated) {
-				const progressPath = path.join(chainDir, "progress.md");
-				fs.writeFileSync(progressPath, "# Progress\n\n## Status\nIn Progress\n\n## Tasks\n\n## Files Changed\n\n## Notes\n");
-				progressCreated = true;
-			}
-
-			// Track if we should abort remaining tasks (for fail-fast)
-			let aborted = false;
-
-			// Execute parallel tasks
-			const parallelResults = await mapConcurrent(
-				step.parallel,
-				concurrency,
-				async (task, taskIndex) => {
-					if (aborted && failFast) {
-						// Return a placeholder for skipped tasks
-						return {
-							agent: task.agent,
-							task: "(skipped)",
-							exitCode: -1,
-							messages: [],
-							usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, turns: 0 },
-							error: "Skipped due to fail-fast",
-						} as SingleResult;
-					}
-
-					// Resolve behavior for this parallel task
-					const behavior = parallelBehaviors[taskIndex]!;
-
-					// Build chain instructions (prefix goes BEFORE task, suffix goes AFTER)
-					const taskTemplate = parallelTemplates[taskIndex] ?? "{previous}";
-					const templateHasPrevious = taskTemplate.includes("{previous}");
-					const { prefix, suffix } = buildChainInstructions(
-						behavior, 
-						chainDir, 
-						false, // parallel tasks don't create progress (pre-created above)
-						templateHasPrevious ? undefined : prev
+			const parallelCwd = step.cwd ?? cwd ?? ctx.cwd;
+			let worktreeSetup: WorktreeSetup | undefined;
+			if (step.worktree) {
+				const worktreeTaskCwdConflict = findWorktreeTaskCwdConflict(step.parallel, parallelCwd);
+				if (worktreeTaskCwdConflict) {
+					return buildChainExecutionErrorResult(
+						`parallel chain step ${stepIndex + 1}: ${formatWorktreeTaskCwdConflict(worktreeTaskCwdConflict, parallelCwd)}`,
+						{
+							results,
+							includeProgress,
+							allProgress,
+							allArtifactPaths,
+							artifactsDir,
+							chainAgents,
+							totalSteps,
+							currentStepIndex: stepIndex,
+						},
 					);
-
-					// Build task string with variable substitution
-					let taskStr = taskTemplate;
-					taskStr = taskStr.replace(/\{task\}/g, originalTask);
-					taskStr = taskStr.replace(/\{previous\}/g, prev);
-					taskStr = taskStr.replace(/\{chain_dir\}/g, chainDir);
-					const cleanTask = taskStr;
-
-					// Assemble final task: prefix (READ/WRITE instructions) + task + suffix
-					taskStr = prefix + taskStr + suffix;
-
-					// Resolve model to full provider/model format for consistent display
-					const taskAgentConfig = agents.find((a) => a.name === task.agent);
-					const effectiveModel =
-						(task.model ? resolveModelFullId(task.model, availableModels) : null)
-						?? resolveModelFullId(taskAgentConfig?.model, availableModels);
-
-					const r = await runSync(ctx.cwd, agents, task.agent, taskStr, {
-						cwd: task.cwd ?? cwd,
-						signal,
-						runId,
-						index: globalTaskIndex + taskIndex,
-						sessionDir: sessionDirForIndex(globalTaskIndex + taskIndex),
-						sessionFile: sessionFileForIndex?.(globalTaskIndex + taskIndex),
-						share: shareEnabled,
-						artifactsDir: artifactConfig.enabled ? artifactsDir : undefined,
-						artifactConfig,
-						modelOverride: effectiveModel,
-						skills: behavior.skills === false ? [] : behavior.skills,
-						onUpdate: onUpdate
-							? (p) => {
-									// Use concat instead of spread for better performance
-									const stepResults = p.details?.results || [];
-									const stepProgress = p.details?.progress || [];
-									onUpdate({
-										...p,
-										details: {
-											mode: "chain",
-											results: results.concat(stepResults),
-											progress: allProgress.concat(stepProgress),
-											chainAgents,
-											totalSteps,
-											currentStepIndex: stepIndex,
-										},
-									});
-								}
-							: undefined,
-					});
-
-					if (r.exitCode !== 0 && failFast) {
-						aborted = true;
-					}
-					recordRun(task.agent, cleanTask, r.exitCode, r.progressSummary?.durationMs ?? 0);
-
-					return r;
-				},
-			);
-
-			// Update global task index
-			globalTaskIndex += step.parallel.length;
-
-			// Collect results and progress
-			for (const r of parallelResults) {
-				results.push(r);
-				if (r.progress) allProgress.push(r.progress);
-				if (r.artifactPaths) allArtifactPaths.push(r.artifactPaths);
-			}
-
-			// Check for failures (track original task index for better error messages)
-			const failures = parallelResults
-				.map((r, originalIndex) => ({ ...r, originalIndex }))
-				.filter((r) => r.exitCode !== 0 && r.exitCode !== -1);
-			if (failures.length > 0) {
-				const failureSummary = failures
-					.map((f) => `- Task ${f.originalIndex + 1} (${f.agent}): ${f.error || "failed"}`)
-					.join("\n");
-				const errorMsg = `Parallel step ${stepIndex + 1} failed:\n${failureSummary}`;
-				const summary = buildChainSummary(chainSteps, results, chainDir, "failed", {
-					index: stepIndex,
-					error: errorMsg,
-				});
-				return {
-					content: [{ type: "text", text: summary }],
-					details: {
-						mode: "chain",
+				}
+				try {
+					worktreeSetup = createWorktrees(parallelCwd, `${runId}-s${stepIndex}`, step.parallel.length);
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					return buildChainExecutionErrorResult(message, {
 						results,
-						progress: includeProgress ? allProgress : undefined,
-						artifacts: allArtifactPaths.length ? { dir: artifactsDir, files: allArtifactPaths } : undefined,
+						includeProgress,
+						allProgress,
+						allArtifactPaths,
+						artifactsDir,
 						chainAgents,
 						totalSteps,
 						currentStepIndex: stepIndex,
-					},
-					isError: true,
-				};
+					});
+				}
 			}
 
-			// Aggregate outputs for {previous}
-			const taskResults: ParallelTaskResult[] = parallelResults.map((r, i) => {
-				const outputTarget = parallelBehaviors[i]?.output;
-				const outputTargetPath = typeof outputTarget === "string"
-					? (path.isAbsolute(outputTarget) ? outputTarget : path.join(chainDir, outputTarget))
-					: undefined;
-				return {
-					agent: r.agent,
-					taskIndex: i,
-					output: getFinalOutput(r.messages),
-					exitCode: r.exitCode,
-					error: r.error,
-					outputTargetPath,
-					outputTargetExists: outputTargetPath ? fs.existsSync(outputTargetPath) : undefined,
-				};
-			});
-			prev = aggregateParallelOutputs(taskResults);
+			try {
+				const agentNames = step.parallel.map((task) => task.agent);
+				const parallelBehaviors = resolveParallelBehaviors(step.parallel, agents, stepIndex, chainSkills);
+				progressCreated = ensureParallelProgressFile(chainDir, progressCreated, parallelBehaviors);
+				createParallelDirs(chainDir, stepIndex, step.parallel.length, agentNames);
+
+				const parallelResults = await runParallelChainTasks({
+					step,
+					parallelTemplates,
+					parallelBehaviors,
+					agents,
+					stepIndex,
+					availableModels,
+					chainDir,
+					prev,
+					originalTask,
+					ctx,
+					cwd,
+					runId,
+					globalTaskIndex,
+					sessionDirForIndex,
+					sessionFileForIndex,
+					shareEnabled,
+					artifactConfig,
+					artifactsDir,
+					signal,
+					onUpdate,
+					results,
+					allProgress,
+					chainAgents,
+					totalSteps,
+					worktreeSetup,
+				});
+				globalTaskIndex += step.parallel.length;
+
+				for (const result of parallelResults) {
+					results.push(result);
+					if (result.progress) allProgress.push(result.progress);
+					if (result.artifactPaths) allArtifactPaths.push(result.artifactPaths);
+				}
+
+				const failures = parallelResults
+					.map((result, originalIndex) => ({ ...result, originalIndex }))
+					.filter((result) => result.exitCode !== 0 && result.exitCode !== -1);
+				if (failures.length > 0) {
+					const failureSummary = failures
+						.map((failure) => `- Task ${failure.originalIndex + 1} (${failure.agent}): ${failure.error || "failed"}`)
+						.join("\n");
+					const errorMsg = `Parallel step ${stepIndex + 1} failed:\n${failureSummary}`;
+					const summary = buildChainSummary(chainSteps, results, chainDir, "failed", {
+						index: stepIndex,
+						error: errorMsg,
+					});
+					return {
+						content: [{ type: "text", text: summary }],
+						isError: true,
+						details: buildChainExecutionDetails({
+							results,
+							includeProgress,
+							allProgress,
+							allArtifactPaths,
+							artifactsDir,
+							chainAgents,
+							totalSteps,
+							currentStepIndex: stepIndex,
+						}),
+					};
+				}
+
+				const taskResults: ParallelTaskResult[] = parallelResults.map((result, i) => {
+					const outputTarget = parallelBehaviors[i]?.output;
+					const outputTargetPath = typeof outputTarget === "string"
+						? (path.isAbsolute(outputTarget) ? outputTarget : path.join(chainDir, outputTarget))
+						: undefined;
+					return {
+						agent: result.agent,
+						taskIndex: i,
+						output: getFinalOutput(result.messages),
+						exitCode: result.exitCode,
+						error: result.error,
+						outputTargetPath,
+						outputTargetExists: outputTargetPath ? fs.existsSync(outputTargetPath) : undefined,
+					};
+				});
+				prev = aggregateParallelOutputs(taskResults);
+				prev = appendParallelWorktreeSummary(
+					prev,
+					worktreeSetup,
+					path.join(chainDir, "worktree-diffs", `step-${stepIndex}`),
+					agentNames,
+				);
+			} finally {
+				if (worktreeSetup) cleanupWorktrees(worktreeSetup);
+			}
 		} else {
 			// === SEQUENTIAL STEP EXECUTION ===
 			const seqStep = step as SequentialStep;

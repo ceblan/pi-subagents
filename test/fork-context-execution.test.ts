@@ -209,7 +209,97 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 		assert.deepEqual(calls, ["leaf-777", "leaf-777"]);
 	});
 
-	it("creates isolated forked sessions per chain step (including parallel steps)", async () => {
+	it("expands top-level parallel task counts before fork session allocation", async () => {
+		const { manager, calls } = makeSessionManagerRecorder({ sessionFile: "/tmp/parent.jsonl", leafId: "leaf-count" });
+		const executor = makeExecutor();
+
+		const result = await executor.execute(
+			"id",
+			{
+				tasks: [{ agent: "echo", task: "task one", count: 3 }],
+				context: "fork",
+			},
+			new AbortController().signal,
+			undefined,
+			makeCtx(manager),
+		);
+
+		assert.equal(result.isError, undefined);
+		assert.equal(calls.length, 3);
+		assert.deepEqual(calls, ["leaf-count", "leaf-count", "leaf-count"]);
+	});
+
+	it("rejects top-level parallel worktree runs with a conflicting task cwd", async () => {
+		const { manager } = makeSessionManagerRecorder({ sessionFile: "/tmp/parent.jsonl", leafId: "leaf-777" });
+		const executor = makeExecutor();
+
+		const result = await executor.execute(
+			"id",
+			{
+				tasks: [
+					{ agent: "echo", task: "task one" },
+					{ agent: "second", task: "task two", cwd: `${tempDir}/other` },
+				],
+				worktree: true,
+			},
+			new AbortController().signal,
+			undefined,
+			makeCtx(manager),
+		);
+
+		assert.equal(result.isError, true);
+		assert.match(result.content[0]?.text ?? "", /worktree isolation uses the shared cwd/i);
+		assert.match(result.content[0]?.text ?? "", /task 2 \(second\) sets cwd/i);
+	});
+
+	it("rejects top-level parallel counts that expand past MAX_PARALLEL", async () => {
+		const { manager } = makeSessionManagerRecorder({ sessionFile: "/tmp/parent.jsonl", leafId: "leaf-max" });
+		const executor = makeExecutor();
+
+		const result = await executor.execute(
+			"id",
+			{
+				tasks: [{ agent: "echo", task: "task one", count: 9 }],
+			},
+			new AbortController().signal,
+			undefined,
+			makeCtx(manager),
+		);
+
+		assert.equal(result.isError, true);
+		assert.match(result.content[0]?.text ?? "", /Max 8 tasks/);
+	});
+
+	it("rejects async chain worktree runs with a conflicting task cwd", async () => {
+		const { manager } = makeSessionManagerRecorder({ sessionFile: "/tmp/parent.jsonl", leafId: "leaf-chain" });
+		const executor = makeExecutor();
+
+		const result = await executor.execute(
+			"id",
+			{
+				chain: [
+					{
+						parallel: [
+							{ agent: "echo", task: "p1" },
+							{ agent: "second", task: "p2", cwd: `${tempDir}/other` },
+						],
+						worktree: true,
+					},
+				],
+				async: true,
+				clarify: false,
+			},
+			new AbortController().signal,
+			undefined,
+			makeCtx(manager),
+		);
+
+		assert.equal(result.isError, true);
+		assert.match(result.content[0]?.text ?? "", /parallel chain step 1/i);
+		assert.match(result.content[0]?.text ?? "", /task 2 \(second\) sets cwd/i);
+	});
+
+	it("creates isolated forked sessions per chain step (including counted parallel steps)", async () => {
 		const { manager, calls } = makeSessionManagerRecorder({ sessionFile: "/tmp/parent.jsonl", leafId: "leaf-chain" });
 		const executor = makeExecutor();
 
@@ -218,7 +308,7 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 			{
 				chain: [
 					{ agent: "echo", task: "step 1" },
-					{ parallel: [{ agent: "echo", task: "p1" }, { agent: "second", task: "p2" }] },
+					{ parallel: [{ agent: "echo", task: "p1", count: 2 }, { agent: "second", task: "p2", count: 2 }] },
 					{ agent: "second", task: "step 3" },
 				],
 				context: "fork",
@@ -230,7 +320,7 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 		);
 
 		assert.equal(result.isError, undefined);
-		assert.equal(calls.length, 4, "1 sequential + 2 parallel + 1 sequential");
-		assert.deepEqual(calls, ["leaf-chain", "leaf-chain", "leaf-chain", "leaf-chain"]);
+		assert.equal(calls.length, 6, "1 sequential + 4 parallel + 1 sequential");
+		assert.deepEqual(calls, ["leaf-chain", "leaf-chain", "leaf-chain", "leaf-chain", "leaf-chain", "leaf-chain"]);
 	});
 });

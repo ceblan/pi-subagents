@@ -222,6 +222,7 @@ export function executeAsyncChain(
 				}, nextSessionFile())),
 				concurrency: s.concurrency,
 				failFast: s.failFast,
+				worktree: s.worktree,
 			};
 		}
 		return buildSeqStep(s as SequentialStep, nextSessionFile());

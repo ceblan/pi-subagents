@@ -8,6 +8,7 @@ export interface PromptTemplateDelegationTask {
 	agent: string;
 	task: string;
 	model?: string;
+	cwd?: string;
 }
 
 export interface PromptTemplateDelegationParallelResult {
@@ -25,11 +26,13 @@ export interface PromptTemplateDelegationRequest {
 	context: "fresh" | "fork";
 	model: string;
 	cwd: string;
+	worktree?: boolean;
 }
 
 export interface PromptTemplateDelegationResponse extends PromptTemplateDelegationRequest {
 	messages: unknown[];
 	parallelResults?: PromptTemplateDelegationParallelResult[];
+	contentText?: string;
 	isError: boolean;
 	errorText?: string;
 }
@@ -115,10 +118,12 @@ function parseDelegationTasks(tasks: unknown): PromptTemplateDelegationTask[] {
 		if (typeof value.agent !== "string" || !value.agent.trim()) return [];
 		if (typeof value.task !== "string" || !value.task.trim()) return [];
 		const model = typeof value.model === "string" && value.model.trim().length > 0 ? value.model : undefined;
+		const cwd = typeof value.cwd === "string" && value.cwd.trim().length > 0 ? value.cwd : undefined;
 		parsed.push({
 			agent: value.agent,
 			task: value.task,
 			...(model ? { model } : {}),
+			...(cwd ? { cwd } : {}),
 		});
 	}
 	return parsed;
@@ -132,6 +137,7 @@ export function parsePromptTemplateRequest(data: unknown): PromptTemplateDelegat
 	if (typeof value.cwd !== "string" || !value.cwd) return undefined;
 	if (value.context !== "fresh" && value.context !== "fork") return undefined;
 	const tasks = parseDelegationTasks(value.tasks);
+	const worktree = value.worktree === true ? true : undefined;
 	const hasSingle =
 		typeof value.agent === "string" &&
 		value.agent.length > 0 &&
@@ -148,6 +154,7 @@ export function parsePromptTemplateRequest(data: unknown): PromptTemplateDelegat
 		context: value.context,
 		model: value.model,
 		cwd: value.cwd,
+		...(worktree ? { worktree } : {}),
 	};
 }
 
@@ -339,12 +346,14 @@ export function registerPromptTemplateDelegationBridge<Ctx extends { cwd?: strin
 					};
 				})
 				: undefined;
+			const contentText = firstTextContent(result.content);
 			const response: PromptTemplateDelegationResponse = {
 				...request,
 				messages,
 				...(parallelResults ? { parallelResults } : {}),
+				...(contentText ? { contentText } : {}),
 				isError: result.isError === true,
-				errorText: result.isError ? firstTextContent(result.content) : undefined,
+				errorText: result.isError ? contentText : undefined,
 			};
 			options.events.emit(PROMPT_TEMPLATE_SUBAGENT_RESPONSE_EVENT, response);
 		} catch (error) {
