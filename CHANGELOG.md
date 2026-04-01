@@ -2,18 +2,30 @@
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-03-31
+
 ### Added
 - Added git worktree isolation for parallel execution via `worktree: true`. Applies to top-level parallel `tasks`, chain steps with `{ parallel: [...] }`, and async/background chain execution. Each parallel task gets its own temporary git worktree, and the aggregated output now includes per-task diff stats plus the directory path containing full patch files.
 - Added `worktree.ts` to manage worktree lifecycle, diff capture, patch generation, and cleanup for isolated parallel runs.
 - Added `count: N` shorthand for top-level parallel `tasks` and chain `parallel` entries so one authored task can expand into repeated identical runs without manual duplication.
-- Documented worktree isolation in the README, including top-level parallel usage, chain-step usage, requirements, and prompt-template integration.
+- Added `subagent_status({ action: "list" })` to list active async runs with flattened step/member status summaries.
+- Added `/subagents-status`, a read-only overlay for active async runs plus recent completed/failed runs with per-run step details. The overlay auto-refreshes while open and preserves the selected run when possible.
+- Documented worktree isolation, async status surfaces, and the reorganized test layout in the README.
+
+### Changed
+- Consolidated tests under `test/unit`, `test/integration`, `test/e2e`, and `test/support`, replacing the old mixed root-level and `test/` layout. Test scripts now target those directories explicitly.
+- Integration tests now use a tiny local file-based mock `pi` harness instead of relying on the external subprocess harness for normal subagent execution.
 
 ### Fixed
+- Loader-based tests now resolve `.js` → `.ts` imports correctly when the repository path contains spaces or other URL-escaped characters. Added a focused regression test for the custom test loader.
 - Worktree-isolated parallel runs now reject task-level `cwd` overrides that differ from the shared batch/step `cwd`, instead of silently ignoring them. Applies to foreground parallel runs, chain parallel steps, and async/background execution.
 - Worktree diff capture now includes committed, modified, and newly created files without accidentally including the synthetic `node_modules` symlink used inside temporary worktrees.
 - Worktree setup now cleans up already-created worktrees if a later worktree in the same batch fails to initialize.
 - Prompt-template delegated parallel responses now preserve the aggregate worktree summary text instead of dropping it when rebuilding the final delegated output.
-
+- Async status and result JSON files are now written atomically so readers do not observe partial JSON during background updates.
+- `readStatus()` now returns `null` only for genuinely missing files and preserves real inspect/read/parse failures with context.
+- Async status polling and result watching now log status/result/watcher failures instead of silently swallowing them, making background completion/debugging failures visible.
+- Slash-command tests now match the current live snapshot contract instead of asserting the stale pre-finalized inline state.
 
 ## [0.11.12] - 2026-03-28
 

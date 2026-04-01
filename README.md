@@ -34,7 +34,7 @@ Use url in the prompt to take screenshot: $@
 
 Then `/take-screenshot https://example.com` switches to Sonnet, delegates to the `browser-screenshoter` agent with `/tmp/screenshots` as the working directory, and restores your model when done. Runtime overrides like `--cwd=<path>` and `--subagent=<name>` work too.
 
-pi-prompt-template-model is entirely optional — pi-subagents works standalone through the `subagent` tool and slash commands.
+pi-prompt-template-model is entirely optional — pi-subagents works standalone through the `subagent` tool and slash commands. If you want reusable prompt-template workflows on top of subagents, including `/chain-prompts` and compare-style prompts like `pi-prompt-template-model`'s `/best-of-n` example, install [pi-prompt-template-model](https://github.com/nicobailon/pi-prompt-template-model) separately and copy any example prompts you want from its `examples/` directory into `~/.pi/agent/prompts/`.
 
 ## Agents
 
@@ -131,6 +131,7 @@ Subagents only get direct MCP tools when `mcp:` items are explicitly listed. Eve
 | `/run <agent> <task>` | Run a single agent with a task |
 | `/chain agent1 "task1" -> agent2 "task2"` | Run agents in sequence with per-step tasks |
 | `/parallel agent1 "task1" -> agent2 "task2"` | Run agents in parallel with per-step tasks |
+| `/subagents-status` | Open the async status overlay for active and recent runs |
 | `/agents` | Open the Agents Manager overlay |
 
 All commands validate agent names locally and tab-complete them, then route through the tool framework for full live progress rendering. Results are sent to the conversation for the LLM to discuss.
@@ -190,7 +191,7 @@ Add `--bg` at the end of any slash command to run in the background:
 /parallel scout "scan frontend" -> scout "scan backend" -> scout "scan infra" --bg
 ```
 
-Without `--bg`, the run is foreground: the tool call stays active and streams progress until completion. With `--bg`, the run is launched asynchronously: control returns immediately, and completion arrives later via notification. In both cases subagents run as separate processes. Check status with `subagent_status`.
+Without `--bg`, the run is foreground: the tool call stays active and streams progress until completion. With `--bg`, the run is launched asynchronously: control returns immediately, and completion arrives later via notification. In both cases subagents run as separate processes. Check status with the `subagent_status` tool, or open the `/subagents-status` slash command for a read-only overlay listing active runs and recent completions.
 
 ### Forked Context Execution
 
@@ -521,9 +522,14 @@ These are the parameters the **LLM agent** passes when it calls the `subagent` t
 
 **subagent_status tool:**
 ```typescript
-{ id: "a53ebe46" }
+{ action: "list" }                    // active async runs only
+{ id: "a53ebe46" }                    // inspect one run
 { dir: "<tmpdir>/pi-async-subagent-runs/a53ebe46-..." }
 ```
+
+**/subagents-status slash command:**
+
+Opens a small read-only overlay that shows active async runs plus recent completed/failed runs. It auto-refreshes every 2 seconds while open, keeps the current run selected when possible, and uses `↑↓` to select a run plus `Esc` to close.
 
 ## Management Actions
 
@@ -657,7 +663,7 @@ Status tool:
 
 | Tool | Description |
 |------|-------------|
-| `subagent_status` | Inspect async run status by id or dir |
+| `subagent_status` | List active async runs or inspect one run by id or dir |
 
 ## Worktree Isolation
 
@@ -698,7 +704,7 @@ After the parallel step completes, per-agent diff stats are appended to the outp
 4. Diff stats appear in the aggregated output; full `.patch` files are written to the artifacts directory
 5. Worktrees and temp branches are cleaned up in a `finally` block
 
-If you use [pi-prompt-template-model](https://github.com/nicobailon/pi-prompt-template-model), worktree isolation is also available via `worktree: true` in chain template frontmatter or the `--worktree` CLI flag on `chain-prompts`.
+If you use [pi-prompt-template-model](https://github.com/nicobailon/pi-prompt-template-model), worktree isolation is also available via `worktree: true` in chain template frontmatter or the `--worktree` CLI flag on `chain-prompts`. `pi-prompt-template-model` compare-style prompts can route through the same worktree machinery too; see the `pi-prompt-template-model` README and `examples/` directory for the installable prompt templates.
 
 ## Chain Variables
 
@@ -836,13 +842,17 @@ Async runs write a dedicated observability folder:
   subagent-log-<id>.md
 ```
 
-`status.json` is the source of truth for async progress and powers the TUI widget. If you already use
-`/status <id>` you can keep doing that; otherwise use:
+`status.json` is the source of truth for async progress and powers both the TUI widget and `/subagents-status`. Async status and result files are written atomically, so readers do not observe partial JSON during background updates.
+
+For programmatic access:
 
 ```typescript
+subagent_status({ action: "list" })
 subagent_status({ id: "<id>" })
 subagent_status({ dir: "<tmpdir>/pi-async-subagent-runs/<id>" })
 ```
+
+For an interactive overview, run the `/subagents-status` slash command to open the overlay listing active runs and recent completed/failed runs. The overlay auto-refreshes every 2 seconds while it is open.
 
 ## Events
 
@@ -863,8 +873,10 @@ Async events:
 ├── chain-execution.ts            # Chain orchestration (sequential + parallel)
 ├── chain-serializer.ts           # Parse/serialize .chain.md files
 ├── async-execution.ts            # Async/background execution support
+├── async-status.ts               # Async run discovery, listing, and formatting
 ├── execution.ts                  # Core runSync, applyThinkingSuffix
 ├── render.ts                     # TUI rendering (widget, tool result display)
+├── subagents-status.ts           # Async status overlay component
 ├── artifacts.ts                  # Artifact management
 ├── formatters.ts                 # Output formatting utilities
 ├── schemas.ts                    # TypeBox parameter schemas
@@ -873,7 +885,6 @@ Async events:
 ├── subagent-runner.ts            # Async runner (detached process)
 ├── parallel-utils.ts             # Parallel execution utilities for async runner
 ├── worktree.ts                   # Git worktree isolation for parallel execution
-├── worktree.test.ts              # Worktree module tests
 ├── pi-spawn.ts                   # Cross-platform pi CLI spawning
 ├── single-output.ts              # Solo agent output file handling
 ├── notify.ts                     # Async completion notifications
@@ -893,5 +904,9 @@ Async events:
 ├── agent-templates.ts            # Agent/chain creation templates
 ├── render-helpers.ts             # Shared pad/row/header/footer helpers
 ├── run-history.ts                # Per-agent run recording (JSONL)
+├── test/unit/                    # Fast unit tests for pure modules
+├── test/integration/             # Loader-based execution/integration tests
+├── test/e2e/                     # End-to-end sandbox tests
+├── test/support/                 # Shared test loader, helpers, and mock pi harness
 └── text-editor.ts                # Shared text editor (word nav, paste)
 ```

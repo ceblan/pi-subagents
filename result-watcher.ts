@@ -5,6 +5,13 @@ import { buildCompletionKey, markSeenWithTtl } from "./completion-dedupe.js";
 import { createFileCoalescer } from "./file-coalescer.js";
 import type { SubagentState } from "./types.js";
 
+function isNotFoundError(error: unknown): boolean {
+	return typeof error === "object"
+		&& error !== null
+		&& "code" in error
+		&& (error as NodeJS.ErrnoException).code === "ENOENT";
+}
+
 export function createResultWatcher(
 	pi: ExtensionAPI,
 	state: SubagentState,
@@ -37,10 +44,24 @@ export function createResultWatcher(
 
 			pi.events.emit("subagent:complete", data);
 			fs.unlinkSync(resultPath);
-		} catch {}
+		} catch (error) {
+			if (isNotFoundError(error)) return;
+			console.error(`Failed to process subagent result file '${resultPath}':`, error);
+		}
 	};
 
 	state.resultFileCoalescer = createFileCoalescer(handleResult, 50);
+
+	const scheduleRestart = () => {
+		state.watcherRestartTimer = setTimeout(() => {
+			try {
+				fs.mkdirSync(resultsDir, { recursive: true });
+				startResultWatcher();
+			} catch (error) {
+				console.error(`Failed to restart subagent result watcher for '${resultsDir}':`, error);
+			}
+		}, 3000);
+	};
 
 	const startResultWatcher = () => {
 		state.watcherRestartTimer = null;
@@ -51,24 +72,16 @@ export function createResultWatcher(
 				if (!fileName.endsWith(".json")) return;
 				state.resultFileCoalescer.schedule(fileName);
 			});
-			state.watcher.on("error", () => {
+			state.watcher.on("error", (error) => {
+				console.error(`Subagent result watcher failed for '${resultsDir}':`, error);
 				state.watcher = null;
-				state.watcherRestartTimer = setTimeout(() => {
-					try {
-						fs.mkdirSync(resultsDir, { recursive: true });
-						startResultWatcher();
-					} catch {}
-				}, 3000);
+				scheduleRestart();
 			});
 			state.watcher.unref?.();
-		} catch {
+		} catch (error) {
+			console.error(`Failed to start subagent result watcher for '${resultsDir}':`, error);
 			state.watcher = null;
-			state.watcherRestartTimer = setTimeout(() => {
-				try {
-					fs.mkdirSync(resultsDir, { recursive: true });
-					startResultWatcher();
-				} catch {}
-			}, 3000);
+			scheduleRestart();
 		}
 	};
 

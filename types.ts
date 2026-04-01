@@ -154,6 +154,7 @@ export interface AsyncStatus {
 	startedAt: number;
 	endedAt?: number;
 	lastUpdate?: number;
+	cwd?: string;
 	currentStep?: number;
 	steps?: Array<{ agent: string; status: string; durationMs?: number; tokens?: TokenUsage; skills?: string[] }>;
 	sessionDir?: string;

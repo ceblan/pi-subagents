@@ -31,6 +31,7 @@ import { registerSlashCommands } from "./slash-commands.js";
 import { registerPromptTemplateDelegationBridge } from "./prompt-template-bridge.js";
 import { registerSlashSubagentBridge } from "./slash-bridge.js";
 import { clearSlashSnapshots, getSlashRenderableSnapshot, resolveSlashMessageDetails, restoreSlashFinalSnapshots, type SlashMessageDetails } from "./slash-live-state.js";
+import { formatAsyncRunList, listAsyncRuns } from "./async-status.js";
 import {
 	type Details,
 	type ExtensionConfig,
@@ -318,6 +319,23 @@ MANAGEMENT (use action field, omit agent/task/chain/tasks):
 		parameters: StatusParams,
 
 		async execute(_id, params, _signal, _onUpdate, _ctx) {
+			if (params.action === "list") {
+				try {
+					const runs = listAsyncRuns(ASYNC_DIR, { states: ["queued", "running"] });
+					return {
+						content: [{ type: "text", text: formatAsyncRunList(runs) }],
+						details: { mode: "single", results: [] },
+					};
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					return {
+						content: [{ type: "text", text: message }],
+						isError: true,
+						details: { mode: "single", results: [] },
+					};
+				}
+			}
+
 			let asyncDir: string | null = null;
 			let resolvedId = params.id;
 
@@ -348,7 +366,17 @@ MANAGEMENT (use action field, omit agent/task/chain/tasks):
 			}
 
 			if (asyncDir) {
-				const status = readStatus(asyncDir);
+				let status;
+				try {
+					status = readStatus(asyncDir);
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					return {
+						content: [{ type: "text", text: message }],
+						isError: true,
+						details: { mode: "single" as const, results: [] },
+					};
+				}
 				const logPath = path.join(asyncDir, `subagent-log-${resolvedId ?? "unknown"}.md`);
 				const eventsPath = path.join(asyncDir, "events.jsonl");
 				if (status) {

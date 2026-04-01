@@ -102,6 +102,7 @@ export const SubagentParams = Type.Object({
 });
 
 export const StatusParams = Type.Object({
+	action: Type.Optional(Type.String({ description: "Action: 'list' to show active async runs, or omit to inspect one run by id/dir" })),
 	id: Type.Optional(Type.String({ description: "Async run id or prefix" })),
 	dir: Type.Optional(Type.String({ description: "Async run directory (overrides id search)" })),
 });

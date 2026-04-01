@@ -206,7 +206,20 @@ function createShareLink(htmlPath: string): { shareUrl: string; gistUrl: string 
 
 function writeJson(filePath: string, payload: object): void {
 	fs.mkdirSync(path.dirname(filePath), { recursive: true });
-	fs.writeFileSync(filePath, JSON.stringify(payload, null, 2), "utf-8");
+	const tempPath = path.join(
+		path.dirname(filePath),
+		`.${path.basename(filePath)}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`,
+	);
+	try {
+		fs.writeFileSync(tempPath, JSON.stringify(payload, null, 2), "utf-8");
+		fs.renameSync(tempPath, filePath);
+	} finally {
+		if (fs.existsSync(tempPath)) {
+			try {
+				fs.unlinkSync(tempPath);
+			} catch {}
+		}
+	}
 }
 
 function formatDuration(ms: number): string {
@@ -882,38 +895,34 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 	});
 
 	try {
-		fs.mkdirSync(path.dirname(resultPath), { recursive: true });
-		fs.writeFileSync(
-			resultPath,
-			JSON.stringify({
-				id,
-				agent: agentName,
-				success: results.every((r) => r.success),
-				summary,
-				results: results.map((r) => ({
-					agent: r.agent,
-					output: r.output,
-					success: r.success,
-					skipped: r.skipped || undefined,
-					artifactPaths: r.artifactPaths,
-					truncated: r.truncated,
-				})),
-				exitCode: results.every((r) => r.success) ? 0 : 1,
-				timestamp: runEndedAt,
-				durationMs: runEndedAt - overallStartTime,
-				truncated,
-				artifactsDir,
-				cwd,
-				asyncDir,
-				sessionId: config.sessionId,
-				sessionFile: effectiveSessionFile,
-				shareUrl,
-				gistUrl,
-				shareError,
-				...(taskIndex !== undefined && { taskIndex }),
-				...(totalTasks !== undefined && { totalTasks }),
-			}),
-		);
+		writeJson(resultPath, {
+			id,
+			agent: agentName,
+			success: results.every((r) => r.success),
+			summary,
+			results: results.map((r) => ({
+				agent: r.agent,
+				output: r.output,
+				success: r.success,
+				skipped: r.skipped || undefined,
+				artifactPaths: r.artifactPaths,
+				truncated: r.truncated,
+			})),
+			exitCode: results.every((r) => r.success) ? 0 : 1,
+			timestamp: runEndedAt,
+			durationMs: runEndedAt - overallStartTime,
+			truncated,
+			artifactsDir,
+			cwd,
+			asyncDir,
+			sessionId: config.sessionId,
+			sessionFile: effectiveSessionFile,
+			shareUrl,
+			gistUrl,
+			shareError,
+			...(taskIndex !== undefined && { taskIndex }),
+			...(totalTasks !== undefined && { totalTasks }),
+		});
 	} catch (err) {
 		console.error(`Failed to write result file ${resultPath}:`, err);
 	}
