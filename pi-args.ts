@@ -125,3 +125,4 @@ export function cleanupTempDir(tempDir: string | null | undefined): void {
 		// Temp cleanup is best effort.
 	}
 }
+

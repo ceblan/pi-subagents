@@ -7,6 +7,7 @@ import { SubagentsStatusComponent } from "./subagents-status.js";
 import { discoverAvailableSkills } from "./skills.js";
 import type { SubagentParamsLike } from "./subagent-executor.js";
 import type { SlashSubagentResponse, SlashSubagentUpdate } from "./slash-bridge.js";
+import { emitOriginalSlashPrompt } from "./slash-prompt.js";
 import {
 	applySlashUpdate,
 	buildSlashInitialResult,
@@ -200,7 +201,10 @@ async function runSlashSubagent(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
 	params: SubagentParamsLike,
+	originalPrompt?: string,
 ): Promise<void> {
+	if (originalPrompt) emitOriginalSlashPrompt(pi, originalPrompt);
+
 	const requestId = randomUUID();
 	const initialDetails = buildSlashInitialResult(requestId, params);
 	const initialText = extractSlashMessageText(initialDetails.result.content) || "Running subagent...";
@@ -418,7 +422,7 @@ export function registerSlashCommands(
 			if (inline.model) params.model = inline.model;
 			if (bg) params.async = true;
 			if (fork) params.context = "fork";
-			await runSlashSubagent(pi, ctx, params);
+			await runSlashSubagent(pi, ctx, params, `/run ${args}`);
 		},
 	});
 
@@ -441,7 +445,7 @@ export function registerSlashCommands(
 			const params: SubagentParamsLike = { chain, task: parsed.task, clarify: false, agentScope: "both" };
 			if (bg) params.async = true;
 			if (fork) params.context = "fork";
-			await runSlashSubagent(pi, ctx, params);
+			await runSlashSubagent(pi, ctx, params, `/chain ${args}`);
 		},
 	});
 
@@ -465,7 +469,7 @@ export function registerSlashCommands(
 			const params: SubagentParamsLike = { tasks, clarify: false, agentScope: "both" };
 			if (bg) params.async = true;
 			if (fork) params.context = "fork";
-			await runSlashSubagent(pi, ctx, params);
+			await runSlashSubagent(pi, ctx, params, `/parallel ${args}`);
 		},
 	});
 

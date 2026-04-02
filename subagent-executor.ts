@@ -48,6 +48,7 @@ import {
 	checkSubagentDepth,
 	wrapForkTask,
 } from "./types.js";
+import { type ExecutionRuntimeOptions, buildRunSyncOptions } from "./execution-runtime-options.js";
 
 interface TaskParam {
 	agent: string;
@@ -93,6 +94,7 @@ interface ExecutorDeps {
 	getSubagentSessionRoot: (parentSessionFile: string | null) => string;
 	expandTilde: (p: string) => string;
 	discoverAgents: (cwd: string, scope: AgentScope) => { agents: AgentConfig[] };
+	runtimeOptions?: ExecutionRuntimeOptions;
 }
 
 interface ExecutionContextData {
@@ -451,6 +453,7 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 		onUpdate,
 		chainSkills,
 		chainDir: params.chainDir,
+		runtimeOptions: deps.runtimeOptions,
 	});
 
 	if (chainResult.requestedAsync) {
@@ -503,6 +506,7 @@ interface ForegroundParallelRunInput {
 	liveProgress: (AgentProgress | undefined)[];
 	onUpdate?: (r: AgentToolResult<Details>) => void;
 	worktreeSetup?: WorktreeSetup;
+	runtimeOptions?: ExecutionRuntimeOptions;
 }
 
 function buildParallelModeError(message: string): AgentToolResult<Details> {
@@ -576,7 +580,7 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 		const overrideSkills = input.skillOverrides[index];
 		const effectiveSkills = overrideSkills === undefined ? input.behaviors[index]?.skills : overrideSkills;
 		const taskCwd = resolveParallelTaskCwd(task, input.paramsCwd, input.worktreeSetup, index);
-		return runSync(input.ctx.cwd, input.agents, task.agent, input.taskTexts[index]!, {
+		return runSync(input.ctx.cwd, input.agents, task.agent, input.taskTexts[index]!, buildRunSyncOptions({
 			cwd: taskCwd,
 			signal: input.signal,
 			runId: input.runId,
@@ -608,7 +612,7 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 						});
 					}
 				: undefined,
-		});
+		}, input.runtimeOptions ?? {}));
 	});
 }
 
@@ -776,6 +780,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 			liveProgress,
 			onUpdate,
 			worktreeSetup,
+			runtimeOptions: deps.runtimeOptions,
 		});
 		for (let i = 0; i < results.length; i++) {
 			const run = results[i]!;
@@ -930,7 +935,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		effectiveSkills = skillOverride;
 	}
 
-	const r = await runSync(ctx.cwd, agents, params.agent!, task, {
+	const r = await runSync(ctx.cwd, agents, params.agent!, task, buildRunSyncOptions({
 		cwd: params.cwd,
 		signal,
 		runId,
@@ -943,7 +948,7 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		onUpdate,
 		modelOverride,
 		skills: effectiveSkills,
-	});
+	}, deps.runtimeOptions ?? {}));
 	recordRun(params.agent!, cleanTask, r.exitCode, r.progressSummary?.durationMs ?? 0);
 
 	if (r.progress) allProgress.push(r.progress);

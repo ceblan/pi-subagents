@@ -47,6 +47,8 @@ import {
 	type SingleResult,
 	MAX_CONCURRENCY,
 } from "./types.js";
+import { type ExecutionRuntimeOptions } from "./execution-runtime-options.js";
+import { buildChainRunSyncOptions } from "./chain-run-sync-options.js";
 
 /** Resolve a model name to its full provider/model format */
 function resolveModelFullId(modelName: string | undefined, availableModels: ModelInfo[]): string | undefined {
@@ -102,6 +104,7 @@ interface ParallelChainRunInput {
 	chainAgents: string[];
 	totalSteps: number;
 	worktreeSetup?: WorktreeSetup;
+	runtimeOptions?: ExecutionRuntimeOptions;
 }
 
 function buildChainExecutionDetails(input: ChainExecutionDetailsInput): Details {
@@ -196,7 +199,7 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 				? input.worktreeSetup.worktrees[taskIndex]!.agentCwd
 				: (task.cwd ?? input.cwd);
 
-			const result = await runSync(input.ctx.cwd, input.agents, task.agent, taskStr, {
+			const result = await runSync(input.ctx.cwd, input.agents, task.agent, taskStr, buildChainRunSyncOptions({
 				cwd: taskCwd,
 				signal: input.signal,
 				runId: input.runId,
@@ -225,7 +228,7 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 							});
 						}
 					: undefined,
-			});
+			}, input.runtimeOptions ?? {}));
 
 			if (result.exitCode !== 0 && failFast) {
 				aborted = true;
@@ -256,6 +259,7 @@ export interface ChainExecutionParams {
 	onUpdate?: (r: AgentToolResult<Details>) => void;
 	chainSkills?: string[];
 	chainDir?: string;
+	runtimeOptions?: ExecutionRuntimeOptions;
 }
 
 export interface ChainExecutionResult {
@@ -290,6 +294,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 		onUpdate,
 		chainSkills: chainSkillsParam,
 		chainDir: chainDirBase,
+		runtimeOptions,
 	} = params;
 	const chainSkills = chainSkillsParam ?? [];
 
@@ -506,6 +511,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 					chainAgents,
 					totalSteps,
 					worktreeSetup,
+					runtimeOptions,
 				});
 				globalTaskIndex += step.parallel.length;
 
@@ -629,7 +635,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				?? resolveModelFullId(agentConfig.model, availableModels);
 
 			// Run step
-			const r = await runSync(ctx.cwd, agents, seqStep.agent, stepTask, {
+			const r = await runSync(ctx.cwd, agents, seqStep.agent, stepTask, buildChainRunSyncOptions({
 				cwd: seqStep.cwd ?? cwd,
 				signal,
 				runId,
@@ -659,7 +665,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 							});
 						}
 					: undefined,
-			});
+			}, runtimeOptions ?? {}));
 			recordRun(seqStep.agent, cleanTask, r.exitCode, r.progressSummary?.durationMs ?? 0);
 
 			globalTaskIndex++;

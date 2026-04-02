@@ -31,6 +31,7 @@ import { buildSkillInjection, resolveSkills } from "./skills.js";
 import { getPiSpawnCommand } from "./pi-spawn.js";
 import { createJsonlWriter } from "./jsonl-writer.js";
 import { applyThinkingSuffix, buildPiArgs, cleanupTempDir } from "./pi-args.js";
+import { runSyncTmux, isTmux } from "./execution-tmux.js";
 
 /**
  * Run a subagent synchronously (blocking until complete)
@@ -69,6 +70,20 @@ export async function runSync(
 		systemPrompt = systemPrompt ? `${systemPrompt}\n\n${skillInjection}` : skillInjection;
 	}
 
+	// === tmux TUI mode: run pi interactively in a tmux pane ===
+	const tmuxConfig = options.tmuxConfig;
+	if (tmuxConfig?.enabled && isTmux()) {
+		return runSyncTmux(runtimeCwd, agent, agentName, task, options, {
+			effectiveModel,
+			skillNames,
+			resolvedSkills,
+			missingSkills,
+			systemPrompt,
+			tmuxConfig,
+		});
+	}
+
+	// === Standard headless mode: JSON streaming ===
 	const { args, env: sharedEnv, tempDir } = buildPiArgs({
 		baseArgs: ["--mode", "json", "-p"],
 		task,
@@ -351,3 +366,5 @@ export async function runSync(
 
 	return result;
 }
+
+

@@ -42,6 +42,7 @@ import {
 	SLASH_RESULT_TYPE,
 	WIDGET_KEY,
 } from "./types.js";
+import { loadSubagentConfig, resolveTmuxConfig } from "./subagent-config.js";
 
 /**
  * Derive subagent session base directory from parent session file.
@@ -60,15 +61,7 @@ function getSubagentSessionRoot(parentSessionFile: string | null): string {
 }
 
 function loadConfig(): ExtensionConfig {
-	const configPath = path.join(os.homedir(), ".pi", "agent", "extensions", "subagent", "config.json");
-	try {
-		if (fs.existsSync(configPath)) {
-			return JSON.parse(fs.readFileSync(configPath, "utf-8")) as ExtensionConfig;
-		}
-	} catch (error) {
-		console.error(`Failed to load subagent config from '${configPath}':`, error);
-	}
-	return {};
+	return loadSubagentConfig();
 }
 
 function expandTilde(p: string): string {
@@ -146,6 +139,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 
 	const config = loadConfig();
 	const asyncByDefault = config.asyncByDefault === true;
+	const tmuxConfig = resolveTmuxConfig(config);
 	const tempArtifactsDir = getArtifactsDir(null);
 	cleanupAllArtifactDirs(DEFAULT_ARTIFACT_CONFIG.cleanupDays);
 
@@ -184,6 +178,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		getSubagentSessionRoot,
 		expandTilde,
 		discoverAgents,
+		runtimeOptions: { tmuxConfig },
 	});
 
 	pi.registerMessageRenderer<SlashMessageDetails>(SLASH_RESULT_TYPE, (message, options, theme) => {

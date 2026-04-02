@@ -234,11 +234,16 @@ export interface RunSyncOptions {
 	modelOverride?: string;
 	/** Skills to inject (overrides agent default if provided) */
 	skills?: string[];
+	/** tmux pane configuration (if enabled, run in tmux TUI mode) */
+	tmuxConfig?: TmuxConfig;
 }
+
+export type TmuxConfig = import("./tmux-config.js").TmuxConfig;
 
 export interface ExtensionConfig {
 	asyncByDefault?: boolean;
 	defaultSessionDir?: string;
+	tmux?: Partial<TmuxConfig>;
 }
 
 // ============================================================================
