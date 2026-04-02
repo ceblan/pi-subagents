@@ -71,6 +71,7 @@ export async function runSync(
 	}
 
 	// === tmux TUI mode: run pi interactively in a tmux pane ===
+	// @lat: [[execution#Tmux TUI Mode]]
 	const tmuxConfig = options.tmuxConfig;
 	if (tmuxConfig?.enabled && isTmux()) {
 		return runSyncTmux(runtimeCwd, agent, agentName, task, options, {
