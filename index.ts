@@ -15,8 +15,9 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import { type ExtensionAPI, type ExtensionContext, type ToolDefinition } from "@mariozechner/pi-coding-agent";
-import { Text } from "@mariozechner/pi-tui";
+import { Box, Container, Spacer, Text } from "@mariozechner/pi-tui";
 import { discoverAgents } from "./agents.js";
 import { cleanupAllArtifactDirs, cleanupOldArtifacts, getArtifactsDir } from "./artifacts.js";
 import { cleanupOldChainDirs } from "./settings.js";
@@ -28,6 +29,9 @@ import { createAsyncJobTracker } from "./async-job-tracker.js";
 import { createResultWatcher } from "./result-watcher.js";
 import { registerSlashCommands } from "./slash-commands.js";
 import { registerPromptTemplateDelegationBridge } from "./prompt-template-bridge.js";
+import { registerSlashSubagentBridge } from "./slash-bridge.js";
+import { clearSlashSnapshots, getSlashRenderableSnapshot, resolveSlashMessageDetails, restoreSlashFinalSnapshots, type SlashMessageDetails } from "./slash-live-state.js";
+import { formatAsyncRunList, listAsyncRuns } from "./async-status.js";
 import {
 	type Details,
 	type ExtensionConfig,
@@ -35,6 +39,7 @@ import {
 	ASYNC_DIR,
 	DEFAULT_ARTIFACT_CONFIG,
 	RESULTS_DIR,
+	SLASH_RESULT_TYPE,
 	WIDGET_KEY,
 } from "./types.js";
 
@@ -92,6 +97,48 @@ function ensureAccessibleDir(dirPath: string): void {
 	}
 }
 
+function isSlashResultRunning(result: { details?: Details }): boolean {
+	return result.details?.progress?.some((entry) => entry.status === "running")
+		|| result.details?.results.some((entry) => entry.progress?.status === "running")
+		|| false;
+}
+
+function isSlashResultError(result: { details?: Details }): boolean {
+	return result.details?.results.some((entry) => entry.exitCode !== 0 && entry.progress?.status !== "running") || false;
+}
+
+function rebuildSlashResultContainer(
+	container: Container,
+	result: AgentToolResult<Details>,
+	options: { expanded: boolean },
+	theme: ExtensionContext["ui"]["theme"],
+): void {
+	container.clear();
+	container.addChild(new Spacer(1));
+	const boxTheme = isSlashResultRunning(result) ? "toolPendingBg" : isSlashResultError(result) ? "toolErrorBg" : "toolSuccessBg";
+	const box = new Box(1, 1, (text: string) => theme.bg(boxTheme, text));
+	box.addChild(renderSubagentResult(result, options, theme));
+	container.addChild(box);
+}
+
+function createSlashResultComponent(
+	details: SlashMessageDetails,
+	options: { expanded: boolean },
+	theme: ExtensionContext["ui"]["theme"],
+): Container {
+	const container = new Container();
+	let lastVersion = -1;
+	container.render = (width: number): string[] => {
+		const snapshot = getSlashRenderableSnapshot(details);
+		if (snapshot.version !== lastVersion) {
+			lastVersion = snapshot.version;
+			rebuildSlashResultContainer(container, snapshot.result, options, theme);
+		}
+		return Container.prototype.render.call(container, width);
+	};
+	return container;
+}
+
 export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	ensureAccessibleDir(RESULTS_DIR);
 	ensureAccessibleDir(ASYNC_DIR);
@@ -139,11 +186,40 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		discoverAgents,
 	});
 
+	pi.registerMessageRenderer<SlashMessageDetails>(SLASH_RESULT_TYPE, (message, options, theme) => {
+		const details = resolveSlashMessageDetails(message.details);
+		if (!details) return undefined;
+		return createSlashResultComponent(details, options, theme);
+	});
+
+	const slashBridge = registerSlashSubagentBridge({
+		events: pi.events,
+		getContext: () => state.lastUiContext,
+		execute: (id, params, signal, onUpdate, ctx) =>
+			executor.execute(id, params, signal, onUpdate, ctx),
+	});
+
 	const promptTemplateBridge = registerPromptTemplateDelegationBridge({
 		events: pi.events,
 		getContext: () => state.lastUiContext,
-		execute: async (requestId, request, signal, ctx, onUpdate) =>
-			executor.execute(
+		execute: async (requestId, request, signal, ctx, onUpdate) => {
+			if (request.tasks && request.tasks.length > 0) {
+				return executor.execute(
+					requestId,
+					{
+						tasks: request.tasks,
+						context: request.context,
+						cwd: request.cwd,
+						worktree: request.worktree,
+						async: false,
+						clarify: false,
+					},
+					signal,
+					onUpdate,
+					ctx,
+				);
+			}
+			return executor.execute(
 				requestId,
 				{
 					agent: request.agent,
@@ -157,8 +233,17 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 				signal,
 				onUpdate,
 				ctx,
-			),
+			);
+		},
 	});
+
+	function effectiveParallelTaskCount(tasks: Array<{ count?: unknown }> | undefined): number {
+		if (!tasks || tasks.length === 0) return 0;
+		return tasks.reduce((total, task) => {
+			const count = typeof task.count === "number" && Number.isInteger(task.count) && task.count >= 1 ? task.count : 1;
+			return total + count;
+		}, 0);
+	}
 
 	const tool: ToolDefinition<typeof SubagentParams, Details> = {
 		name: "subagent",
@@ -167,8 +252,8 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 
 EXECUTION (use exactly ONE mode):
 • SINGLE: { agent, task } - one task
-• CHAIN: { chain: [{agent:"scout"}, {agent:"planner"}] } - sequential pipeline
-• PARALLEL: { tasks: [{agent,task}, ...] } - concurrent execution
+• CHAIN: { chain: [{agent:"scout"}, {parallel:[{agent:"worker",count:3}]}] } - sequential pipeline with optional parallel fan-out
+• PARALLEL: { tasks: [{agent,task,count?}, ...], worktree?: true } - concurrent execution (worktree: isolate each task in a git worktree)
 • Optional context: { context: "fresh" | "fork" } (default: "fresh")
 
 CHAIN TEMPLATE VARIABLES (use in task strings):
@@ -176,20 +261,15 @@ CHAIN TEMPLATE VARIABLES (use in task strings):
 • {previous} - Text response from the previous step (empty for first step)
 • {chain_dir} - Shared directory for chain files (e.g., <tmpdir>/pi-chain-runs/abc123/)
 
-CHAIN DATA FLOW:
-1. Each step's text response automatically becomes {previous} for the next step
-2. Steps can also write files to {chain_dir} (via agent's "output" config)
-3. Later steps can read those files (via agent's "reads" config)
-
 Example: { chain: [{agent:"scout", task:"Analyze {task}"}, {agent:"planner", task:"Plan based on {previous}"}] }
 
-MANAGEMENT (use action field — omit agent/task/chain/tasks):
-• { action: "list" } - discover available agents and chains
-• { action: "get", agent: "name" } - full agent detail with system prompt
-• { action: "create", config: { name, description, systemPrompt, ... } } - create agent/chain
-• { action: "update", agent: "name", config: { ... } } - modify fields (merge)
-• { action: "delete", agent: "name" } - remove definition
-• Use chainName instead of agent for chain operations`,
+MANAGEMENT (use action field, omit agent/task/chain/tasks):
+• { action: "list" } - discover agents/chains
+• { action: "get", agent: "name" } - full agent detail
+• { action: "create", config: { name, systemPrompt, ... } }
+• { action: "update", agent: "name", config: { ... } } - merge
+• { action: "delete", agent: "name" }
+• Use chainName for chain operations`,
 		parameters: SubagentParams,
 
 		execute(id, params, signal, onUpdate, ctx) {
@@ -205,6 +285,7 @@ MANAGEMENT (use action field — omit agent/task/chain/tasks):
 				);
 			}
 			const isParallel = (args.tasks?.length ?? 0) > 0;
+			const parallelCount = effectiveParallelTaskCount(args.tasks as Array<{ count?: unknown }> | undefined);
 			const asyncLabel = args.async === true && !isParallel ? theme.fg("warning", " [async]") : "";
 			if (args.chain?.length)
 				return new Text(
@@ -214,7 +295,7 @@ MANAGEMENT (use action field — omit agent/task/chain/tasks):
 				);
 			if (isParallel)
 				return new Text(
-					`${theme.fg("toolTitle", theme.bold("subagent "))}parallel (${args.tasks!.length})`,
+					`${theme.fg("toolTitle", theme.bold("subagent "))}parallel (${parallelCount})`,
 					0,
 					0,
 				);
@@ -238,6 +319,23 @@ MANAGEMENT (use action field — omit agent/task/chain/tasks):
 		parameters: StatusParams,
 
 		async execute(_id, params, _signal, _onUpdate, _ctx) {
+			if (params.action === "list") {
+				try {
+					const runs = listAsyncRuns(ASYNC_DIR, { states: ["queued", "running"] });
+					return {
+						content: [{ type: "text", text: formatAsyncRunList(runs) }],
+						details: { mode: "single", results: [] },
+					};
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					return {
+						content: [{ type: "text", text: message }],
+						isError: true,
+						details: { mode: "single", results: [] },
+					};
+				}
+			}
+
 			let asyncDir: string | null = null;
 			let resolvedId = params.id;
 
@@ -268,7 +366,17 @@ MANAGEMENT (use action field — omit agent/task/chain/tasks):
 			}
 
 			if (asyncDir) {
-				const status = readStatus(asyncDir);
+				let status;
+				try {
+					status = readStatus(asyncDir);
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					return {
+						content: [{ type: "text", text: message }],
+						isError: true,
+						details: { mode: "single" as const, results: [] },
+					};
+				}
 				const logPath = path.join(asyncDir, `subagent-log-${resolvedId ?? "unknown"}.md`);
 				const eventsPath = path.join(asyncDir, "events.jsonl");
 				if (status) {
@@ -324,7 +432,7 @@ MANAGEMENT (use action field — omit agent/task/chain/tasks):
 
 	pi.registerTool(tool);
 	pi.registerTool(statusTool);
-	registerSlashCommands(pi, state, getSubagentSessionRoot);
+	registerSlashCommands(pi, state);
 
 	pi.events.on("subagent:started", handleStarted);
 	pi.events.on("subagent:complete", handleComplete);
@@ -356,6 +464,7 @@ MANAGEMENT (use action field — omit agent/task/chain/tasks):
 		state.lastUiContext = ctx;
 		cleanupSessionArtifacts(ctx);
 		resetJobs(ctx);
+		restoreSlashFinalSnapshots(ctx.sessionManager.getEntries());
 	};
 
 	pi.on("session_start", (_event, ctx) => {
@@ -376,6 +485,9 @@ MANAGEMENT (use action field — omit agent/task/chain/tasks):
 		}
 		state.cleanupTimers.clear();
 		state.asyncJobs.clear();
+		clearSlashSnapshots();
+		slashBridge.cancelAll();
+		slashBridge.dispose();
 		promptTemplateBridge.cancelAll();
 		promptTemplateBridge.dispose();
 		if (state.lastUiContext?.hasUI) {

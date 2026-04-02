@@ -1,15 +1,28 @@
 import { randomUUID } from "node:crypto";
-import * as fs from "node:fs";
-import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { Key, matchesKey } from "@mariozechner/pi-tui";
 import { discoverAgents, discoverAgentsAll } from "./agents.js";
-import { executeAsyncChain, isAsyncAvailable } from "./async-execution.js";
-import { executeChain } from "./chain-execution.js";
 import { AgentManagerComponent, type ManagerResult } from "./agent-manager.js";
+import { SubagentsStatusComponent } from "./subagents-status.js";
 import { discoverAvailableSkills } from "./skills.js";
-import { getArtifactsDir } from "./artifacts.js";
-import { DEFAULT_ARTIFACT_CONFIG, MAX_PARALLEL, type SubagentState, type ArtifactConfig } from "./types.js";
-import type { SequentialStep } from "./settings.js";
+import type { SubagentParamsLike } from "./subagent-executor.js";
+import type { SlashSubagentResponse, SlashSubagentUpdate } from "./slash-bridge.js";
+import {
+	applySlashUpdate,
+	buildSlashInitialResult,
+	failSlashResult,
+	finalizeSlashResult,
+} from "./slash-live-state.js";
+import {
+	MAX_PARALLEL,
+	SLASH_RESULT_TYPE,
+	SLASH_SUBAGENT_CANCEL_EVENT,
+	SLASH_SUBAGENT_REQUEST_EVENT,
+	SLASH_SUBAGENT_RESPONSE_EVENT,
+	SLASH_SUBAGENT_STARTED_EVENT,
+	SLASH_SUBAGENT_UPDATE_EVENT,
+	type SubagentState,
+} from "./types.js";
 
 interface InlineConfig {
 	output?: string | false;
@@ -71,25 +84,6 @@ const extractExecutionFlags = (rawArgs: string): { args: string; bg: boolean; fo
 	return { args, bg, fork };
 };
 
-function setupDirectRun(ctx: ExtensionContext, getSubagentSessionRoot: (parentSessionFile: string | null) => string) {
-	const runId = randomUUID().slice(0, 8);
-	const parentSessionFile = ctx.sessionManager.getSessionFile() ?? null;
-	const sessionRoot = path.join(getSubagentSessionRoot(parentSessionFile), runId);
-	try {
-		fs.mkdirSync(sessionRoot, { recursive: true });
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		throw new Error(`Failed to create session directory '${sessionRoot}': ${message}`);
-	}
-	return {
-		runId,
-		shareEnabled: false,
-		sessionDirForIndex: (idx?: number) => path.join(sessionRoot, `run-${idx ?? 0}`),
-		artifactsDir: getArtifactsDir(parentSessionFile),
-		artifactConfig: { ...DEFAULT_ARTIFACT_CONFIG } as ArtifactConfig,
-	};
-}
-
 const makeAgentCompletions = (state: SubagentState, multiAgent: boolean) => (prefix: string) => {
 	const agents = discoverAgents(state.baseCwd, "both").agents;
 	if (!multiAgent) {
@@ -111,11 +105,145 @@ const makeAgentCompletions = (state: SubagentState, multiAgent: boolean) => (pre
 	return agents.filter((a) => a.name.startsWith(lastWord)).map((a) => ({ value: `${beforeLastWord}${a.name}`, label: a.name }));
 };
 
+async function requestSlashRun(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	requestId: string,
+	params: SubagentParamsLike,
+): Promise<SlashSubagentResponse> {
+	return new Promise((resolve, reject) => {
+		let done = false;
+		let started = false;
+
+		const startTimeoutMs = 15_000;
+		const startTimeout = setTimeout(() => {
+			finish(() => reject(new Error(
+				"Slash subagent bridge did not start within 15s. Ensure the extension is loaded correctly.",
+			)));
+		}, startTimeoutMs);
+
+		const onStarted = (data: unknown) => {
+			if (done || !data || typeof data !== "object") return;
+			if ((data as { requestId?: unknown }).requestId !== requestId) return;
+			started = true;
+			clearTimeout(startTimeout);
+			if (ctx.hasUI) ctx.ui.setStatus("subagent-slash", "running...");
+		};
+
+		const onResponse = (data: unknown) => {
+			if (done || !data || typeof data !== "object") return;
+			const response = data as Partial<SlashSubagentResponse>;
+			if (response.requestId !== requestId) return;
+			clearTimeout(startTimeout);
+			finish(() => resolve(response as SlashSubagentResponse));
+		};
+
+		const onUpdate = (data: unknown) => {
+			if (done || !data || typeof data !== "object") return;
+			const update = data as SlashSubagentUpdate;
+			if (update.requestId !== requestId) return;
+			applySlashUpdate(requestId, update);
+			if (!ctx.hasUI) return;
+			const tool = update.currentTool ? ` ${update.currentTool}` : "";
+			const count = update.toolCount ?? 0;
+			ctx.ui.setStatus("subagent-slash", `${count} tools${tool}`);
+		};
+
+		const onTerminalInput = ctx.hasUI
+			? ctx.ui.onTerminalInput((input) => {
+				if (!matchesKey(input, Key.escape)) return undefined;
+				pi.events.emit(SLASH_SUBAGENT_CANCEL_EVENT, { requestId });
+				finish(() => reject(new Error("Cancelled")));
+				return { consume: true };
+			})
+			: undefined;
+
+		const unsubStarted = pi.events.on(SLASH_SUBAGENT_STARTED_EVENT, onStarted);
+		const unsubResponse = pi.events.on(SLASH_SUBAGENT_RESPONSE_EVENT, onResponse);
+		const unsubUpdate = pi.events.on(SLASH_SUBAGENT_UPDATE_EVENT, onUpdate);
+
+		const finish = (next: () => void) => {
+			if (done) return;
+			done = true;
+			clearTimeout(startTimeout);
+			unsubStarted();
+			unsubResponse();
+			unsubUpdate();
+			onTerminalInput?.();
+			if (ctx.hasUI) ctx.ui.setStatus("subagent-slash", undefined);
+			next();
+		};
+
+		pi.events.emit(SLASH_SUBAGENT_REQUEST_EVENT, { requestId, params });
+
+		// Bridge emits STARTED synchronously during REQUEST emit.
+		// If not started, no bridge received the request.
+		if (!started && done) return;
+		if (!started) {
+			finish(() => reject(new Error(
+				"No slash subagent bridge responded. Ensure the subagent extension is loaded correctly.",
+			)));
+		}
+	});
+}
+
+function extractSlashMessageText(content: string | Array<{ type?: string; text?: string }>): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content
+		.filter((part): part is { type: "text"; text: string } => part?.type === "text" && typeof part.text === "string")
+		.map((part) => part.text)
+		.join("\n");
+}
+
+async function runSlashSubagent(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	params: SubagentParamsLike,
+): Promise<void> {
+	const requestId = randomUUID();
+	const initialDetails = buildSlashInitialResult(requestId, params);
+	const initialText = extractSlashMessageText(initialDetails.result.content) || "Running subagent...";
+	pi.sendMessage({
+		customType: SLASH_RESULT_TYPE,
+		content: initialText,
+		display: true,
+		details: initialDetails,
+	});
+
+	try {
+		const response = await requestSlashRun(pi, ctx, requestId, params);
+		const finalDetails = finalizeSlashResult(response);
+		const text = extractSlashMessageText(response.result.content) || response.errorText || "(no output)";
+		pi.sendMessage({
+			customType: SLASH_RESULT_TYPE,
+			content: text,
+			display: false,
+			details: finalDetails,
+		});
+		if (response.isError && ctx.hasUI) {
+			ctx.ui.notify(response.errorText || "Subagent failed", "error");
+		}
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		const failedDetails = failSlashResult(requestId, params, message === "Cancelled" ? "Cancelled" : message);
+		pi.sendMessage({
+			customType: SLASH_RESULT_TYPE,
+			content: message,
+			display: false,
+			details: failedDetails,
+		});
+		if (message === "Cancelled") {
+			if (ctx.hasUI) ctx.ui.notify("Cancelled", "warning");
+			return;
+		}
+		if (ctx.hasUI) ctx.ui.notify(message, "error");
+	}
+}
+
 async function openAgentManager(
 	pi: ExtensionAPI,
-	state: SubagentState,
 	ctx: ExtensionContext,
-	getSubagentSessionRoot: (parentSessionFile: string | null) => string,
 ): Promise<void> {
 	const agentData = { ...discoverAgentsAll(ctx.cwd), cwd: ctx.cwd };
 	const models = ctx.modelRegistry.getAvailable().map((m) => ({
@@ -132,54 +260,26 @@ async function openAgentManager(
 	if (!result) return;
 
 	if (result.action === "chain") {
-		const agents = discoverAgents(state.baseCwd, "both").agents;
-		const exec = setupDirectRun(ctx, getSubagentSessionRoot);
-		const chain: SequentialStep[] = result.agents.map((name, i) => ({
+		const chain = result.agents.map((name, i) => ({
 			agent: name,
 			...(i === 0 ? { task: result.task } : {}),
 		}));
-		executeChain({ chain, task: result.task, agents, ctx, ...exec, clarify: true })
-			.then((r) => {
-				if (r.requestedAsync) {
-					if (!isAsyncAvailable()) {
-						pi.sendUserMessage("Background mode requires jiti for TypeScript execution but it could not be found.");
-						return;
-					}
-					const id = randomUUID();
-					const asyncCtx = { pi, cwd: ctx.cwd, currentSessionId: ctx.sessionManager.getSessionId() ?? id };
-					const asyncSessionRoot = getSubagentSessionRoot(ctx.sessionManager.getSessionFile() ?? null);
-					fs.mkdirSync(asyncSessionRoot, { recursive: true });
-					executeAsyncChain(id, {
-						chain: r.requestedAsync.chain,
-						agents,
-						ctx: asyncCtx,
-						maxOutput: undefined,
-						artifactsDir: exec.artifactsDir,
-						artifactConfig: exec.artifactConfig,
-						shareEnabled: false,
-						sessionRoot: asyncSessionRoot,
-						chainSkills: r.requestedAsync.chainSkills,
-					}).then((asyncResult) => {
-						pi.sendUserMessage(asyncResult.content[0]?.text || "(launched in background)");
-					}).catch((err) => {
-						pi.sendUserMessage(`Async launch failed: ${err instanceof Error ? err.message : String(err)}`);
-					});
-					return;
-				}
-				pi.sendUserMessage(r.content[0]?.text || "(no output)");
-			})
-			.catch((err) => pi.sendUserMessage(`Chain failed: ${err instanceof Error ? err.message : String(err)}`));
+		await runSlashSubagent(pi, ctx, {
+			chain,
+			task: result.task,
+			clarify: true,
+			agentScope: "both",
+		});
 		return;
 	}
 
-	const sendToolCall = (params: Record<string, unknown>) => {
-		pi.sendUserMessage(
-			`Call the subagent tool with these exact parameters: ${JSON.stringify({ ...params, agentScope: "both" })}`,
-		);
-	};
-
 	if (result.action === "launch") {
-		sendToolCall({ agent: result.agent, task: result.task, clarify: !result.skipClarify });
+		await runSlashSubagent(pi, ctx, {
+			agent: result.agent,
+			task: result.task,
+			clarify: !result.skipClarify,
+			agentScope: "both",
+		});
 	} else if (result.action === "launch-chain") {
 		const chainParam = result.chain.steps.map((step) => ({
 			agent: step.agent,
@@ -190,9 +290,18 @@ async function openAgentManager(
 			skill: step.skills,
 			model: step.model,
 		}));
-		sendToolCall({ chain: chainParam, task: result.task, clarify: !result.skipClarify });
+		await runSlashSubagent(pi, ctx, {
+			chain: chainParam,
+			task: result.task,
+			clarify: !result.skipClarify,
+			agentScope: "both",
+		});
 	} else if (result.action === "parallel") {
-		sendToolCall({ tasks: result.tasks, clarify: !result.skipClarify });
+		await runSlashSubagent(pi, ctx, {
+			tasks: result.tasks,
+			clarify: !result.skipClarify,
+			agentScope: "both",
+		});
 	}
 }
 
@@ -276,12 +385,11 @@ const parseAgentArgs = (
 export function registerSlashCommands(
 	pi: ExtensionAPI,
 	state: SubagentState,
-	getSubagentSessionRoot: (parentSessionFile: string | null) => string,
 ): void {
 	pi.registerCommand("agents", {
 		description: "Open the Agents Manager",
 		handler: async (_args, ctx) => {
-			await openAgentManager(pi, state, ctx, getSubagentSessionRoot);
+			await openAgentManager(pi, ctx);
 		},
 	});
 
@@ -304,13 +412,13 @@ export function registerSlashCommands(
 			if (inline.reads && Array.isArray(inline.reads) && inline.reads.length > 0) {
 				finalTask = `[Read from: ${inline.reads.join(", ")}]\n\n${finalTask}`;
 			}
-			const params: Record<string, unknown> = { agent: agentName, task: finalTask, clarify: false };
+			const params: SubagentParamsLike = { agent: agentName, task: finalTask, clarify: false, agentScope: "both" };
 			if (inline.output !== undefined) params.output = inline.output;
 			if (inline.skill !== undefined) params.skill = inline.skill;
 			if (inline.model) params.model = inline.model;
 			if (bg) params.async = true;
 			if (fork) params.context = "fork";
-			pi.sendUserMessage(`Call the subagent tool with these exact parameters: ${JSON.stringify({ ...params, agentScope: "both" })}`);
+			await runSlashSubagent(pi, ctx, params);
 		},
 	});
 
@@ -330,10 +438,10 @@ export function registerSlashCommands(
 				...(config.skill !== undefined ? { skill: config.skill } : {}),
 				...(config.progress !== undefined ? { progress: config.progress } : {}),
 			}));
-			const params: Record<string, unknown> = { chain, task: parsed.task, clarify: false, agentScope: "both" };
+			const params: SubagentParamsLike = { chain, task: parsed.task, clarify: false, agentScope: "both" };
 			if (bg) params.async = true;
 			if (fork) params.context = "fork";
-			pi.sendUserMessage(`Call the subagent tool with these exact parameters: ${JSON.stringify(params)}`);
+			await runSlashSubagent(pi, ctx, params);
 		},
 	});
 
@@ -354,16 +462,26 @@ export function registerSlashCommands(
 				...(config.skill !== undefined ? { skill: config.skill } : {}),
 				...(config.progress !== undefined ? { progress: config.progress } : {}),
 			}));
-			const params: Record<string, unknown> = { chain: [{ parallel: tasks }], task: parsed.task, clarify: false, agentScope: "both" };
+			const params: SubagentParamsLike = { tasks, clarify: false, agentScope: "both" };
 			if (bg) params.async = true;
 			if (fork) params.context = "fork";
-			pi.sendUserMessage(`Call the subagent tool with these exact parameters: ${JSON.stringify(params)}`);
+			await runSlashSubagent(pi, ctx, params);
+		},
+	});
+
+	pi.registerCommand("subagents-status", {
+		description: "Show active and recent async subagent runs",
+		handler: async (_args, ctx) => {
+			await ctx.ui.custom<void>(
+				(tui, theme, _kb, done) => new SubagentsStatusComponent(tui, theme, () => done(undefined)),
+				{ overlay: true, overlayOptions: { anchor: "center", width: 84, maxHeight: "80%" } },
+			);
 		},
 	});
 
 	pi.registerShortcut("ctrl+shift+a", {
 		handler: async (ctx) => {
-			await openAgentManager(pi, state, ctx, getSubagentSessionRoot);
+			await openAgentManager(pi, ctx);
 		},
 	});
 }

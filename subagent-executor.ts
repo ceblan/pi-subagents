@@ -25,6 +25,15 @@ import { createForkContextResolver } from "./fork-context.js";
 import { finalizeSingleOutput, injectSingleOutputInstruction, resolveSingleOutputPath } from "./single-output.js";
 import { getFinalOutput, mapConcurrent } from "./utils.js";
 import {
+	cleanupWorktrees,
+	createWorktrees,
+	diffWorktrees,
+	findWorktreeTaskCwdConflict,
+	formatWorktreeDiffSummary,
+	formatWorktreeTaskCwdConflict,
+	type WorktreeSetup,
+} from "./worktree.js";
+import {
 	type AgentProgress,
 	type ArtifactConfig,
 	type ArtifactPaths,
@@ -44,6 +53,7 @@ interface TaskParam {
 	agent: string;
 	task: string;
 	cwd?: string;
+	count?: number;
 	model?: string;
 	skill?: string | string[] | boolean;
 	output?: string | false;
@@ -51,12 +61,13 @@ interface TaskParam {
 	progress?: boolean;
 }
 
-interface SubagentParamsLike {
+export interface SubagentParamsLike {
 	action?: string;
 	agent?: string;
 	task?: string;
 	chain?: ChainStep[];
 	tasks?: TaskParam[];
+	worktree?: boolean;
 	context?: "fresh" | "fork";
 	async?: boolean;
 	clarify?: boolean;
@@ -107,6 +118,7 @@ function validateExecutionInput(
 	hasChain: boolean,
 	hasTasks: boolean,
 	hasSingle: boolean,
+	allowClarifyTaskPrompt: boolean,
 ): AgentToolResult<Details> | null {
 	if (Number(hasChain) + Number(hasTasks) + Number(hasSingle) !== 1) {
 		return {
@@ -139,7 +151,7 @@ function validateExecutionInput(
 					details: { mode: "chain" as const, results: [] },
 				};
 			}
-		} else if (!(firstStep as SequentialStep).task && !params.task) {
+		} else if (!(firstStep as SequentialStep).task && !params.task && !allowClarifyTaskPrompt) {
 			return {
 				content: [{ type: "text", text: "First step in chain must have a task" }],
 				isError: true,
@@ -176,6 +188,76 @@ function getRequestedModeLabel(params: SubagentParamsLike): Details["mode"] {
 	if ((params.tasks?.length ?? 0) > 0) return "parallel";
 	if (params.agent && params.task) return "single";
 	return "single";
+}
+
+function buildRequestedModeError(params: SubagentParamsLike, message: string): AgentToolResult<Details> {
+	return withForkContext(
+		{
+			content: [{ type: "text", text: message }],
+			isError: true,
+			details: { mode: getRequestedModeLabel(params), results: [] },
+		},
+		params.context,
+	);
+}
+
+function expandTopLevelTaskCounts(tasks: TaskParam[]): { tasks?: TaskParam[]; error?: string } {
+	const expanded: TaskParam[] = [];
+	for (let taskIndex = 0; taskIndex < tasks.length; taskIndex++) {
+		const task = tasks[taskIndex]!;
+		const rawCount = (task as TaskParam & { count?: unknown }).count;
+		if (rawCount !== undefined && (typeof rawCount !== "number" || !Number.isInteger(rawCount) || rawCount < 1)) {
+			return { error: `tasks[${taskIndex}].count must be an integer >= 1` };
+		}
+		const { count, ...concreteTask } = task;
+		for (let repeat = 0; repeat < (rawCount ?? 1); repeat++) {
+			expanded.push({ ...concreteTask });
+		}
+	}
+	return { tasks: expanded };
+}
+
+function expandChainParallelCounts(chain: ChainStep[]): { chain?: ChainStep[]; error?: string } {
+	const expandedChain: ChainStep[] = [];
+	for (let stepIndex = 0; stepIndex < chain.length; stepIndex++) {
+		const step = chain[stepIndex]!;
+		if (!isParallelStep(step)) {
+			expandedChain.push(step);
+			continue;
+		}
+		const expandedParallel = [];
+		for (let taskIndex = 0; taskIndex < step.parallel.length; taskIndex++) {
+			const task = step.parallel[taskIndex]!;
+			const rawCount = (task as typeof task & { count?: unknown }).count;
+			if (rawCount !== undefined && (typeof rawCount !== "number" || !Number.isInteger(rawCount) || rawCount < 1)) {
+				return { error: `chain[${stepIndex}].parallel[${taskIndex}].count must be an integer >= 1` };
+			}
+			const { count, ...concreteTask } = task;
+			for (let repeat = 0; repeat < (rawCount ?? 1); repeat++) {
+				expandedParallel.push({ ...concreteTask });
+			}
+		}
+		expandedChain.push({ ...step, parallel: expandedParallel });
+	}
+	return { chain: expandedChain };
+}
+
+function normalizeRepeatedParallelCounts(params: SubagentParamsLike): { params?: SubagentParamsLike; error?: AgentToolResult<Details> } {
+	if (params.tasks) {
+		const expandedTasks = expandTopLevelTaskCounts(params.tasks);
+		if (expandedTasks.error) {
+			return { error: buildRequestedModeError(params, expandedTasks.error) };
+		}
+		return { params: { ...params, tasks: expandedTasks.tasks } };
+	}
+	if (params.chain) {
+		const expandedChain = expandChainParallelCounts(params.chain);
+		if (expandedChain.error) {
+			return { error: buildRequestedModeError(params, expandedChain.error) };
+		}
+		return { params: { ...params, chain: expandedChain.chain } };
+	}
+	return { params };
 }
 
 function withForkContext(
@@ -259,6 +341,17 @@ function runAsyncPath(data: ExecutionContextData, deps: ExecutorDeps): AgentTool
 	const hasChain = (params.chain?.length ?? 0) > 0;
 	const hasSingle = Boolean(params.agent && params.task);
 	if (!effectiveAsync) return null;
+
+	if (hasChain && params.chain) {
+		const chainWorktreeTaskCwdError = buildChainWorktreeTaskCwdError(params.chain as ChainStep[], params.cwd ?? ctx.cwd);
+		if (chainWorktreeTaskCwdError) {
+			return {
+				content: [{ type: "text", text: chainWorktreeTaskCwdError }],
+				isError: true,
+				details: { mode: "chain" as const, results: [] },
+			};
+		}
+	}
 
 	if (!isAsyncAvailable()) {
 		return {
@@ -389,6 +482,136 @@ async function runChainPath(data: ExecutionContextData, deps: ExecutorDeps): Pro
 	return chainResult;
 }
 
+interface ForegroundParallelRunInput {
+	tasks: TaskParam[];
+	taskTexts: string[];
+	agents: AgentConfig[];
+	ctx: ExtensionContext;
+	signal: AbortSignal;
+	runId: string;
+	sessionDirForIndex: (idx?: number) => string | undefined;
+	sessionFileForIndex: (idx?: number) => string | undefined;
+	shareEnabled: boolean;
+	artifactConfig: ArtifactConfig;
+	artifactsDir: string;
+	maxOutput?: MaxOutputConfig;
+	paramsCwd?: string;
+	modelOverrides: (string | undefined)[];
+	skillOverrides: (string[] | false | undefined)[];
+	behaviors: Array<ReturnType<typeof resolveStepBehavior>>;
+	liveResults: (SingleResult | undefined)[];
+	liveProgress: (AgentProgress | undefined)[];
+	onUpdate?: (r: AgentToolResult<Details>) => void;
+	worktreeSetup?: WorktreeSetup;
+}
+
+function buildParallelModeError(message: string): AgentToolResult<Details> {
+	return {
+		content: [{ type: "text", text: message }],
+		isError: true,
+		details: { mode: "parallel" as const, results: [] },
+	};
+}
+
+function createParallelWorktreeSetup(
+	enabled: boolean | undefined,
+	cwd: string,
+	runId: string,
+	taskCount: number,
+): { setup?: WorktreeSetup; errorResult?: AgentToolResult<Details> } {
+	if (!enabled) return {};
+	try {
+		return { setup: createWorktrees(cwd, runId, taskCount) };
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		return { errorResult: buildParallelModeError(message) };
+	}
+}
+
+function buildParallelWorktreeTaskCwdError(
+	tasks: ReadonlyArray<{ agent: string; cwd?: string }>,
+	sharedCwd: string,
+): string | undefined {
+	const conflict = findWorktreeTaskCwdConflict(tasks, sharedCwd);
+	if (!conflict) return undefined;
+	return formatWorktreeTaskCwdConflict(conflict, sharedCwd);
+}
+
+function buildChainWorktreeTaskCwdError(chain: ChainStep[], sharedCwd: string): string | undefined {
+	for (let stepIndex = 0; stepIndex < chain.length; stepIndex++) {
+		const step = chain[stepIndex]!;
+		if (!isParallelStep(step) || !step.worktree) continue;
+		const stepCwd = step.cwd ?? sharedCwd;
+		const conflict = findWorktreeTaskCwdConflict(step.parallel, stepCwd);
+		if (!conflict) continue;
+		const detail = formatWorktreeTaskCwdConflict(conflict, stepCwd);
+		return `parallel chain step ${stepIndex + 1}: ${detail}`;
+	}
+	return undefined;
+}
+
+function resolveParallelTaskCwd(
+	task: TaskParam,
+	paramsCwd: string | undefined,
+	worktreeSetup: WorktreeSetup | undefined,
+	index: number,
+): string | undefined {
+	if (worktreeSetup) return worktreeSetup.worktrees[index]!.agentCwd;
+	return task.cwd ?? paramsCwd;
+}
+
+function buildParallelWorktreeSuffix(
+	worktreeSetup: WorktreeSetup | undefined,
+	artifactsDir: string,
+	tasks: TaskParam[],
+): string {
+	if (!worktreeSetup) return "";
+	const diffsDir = path.join(artifactsDir, "worktree-diffs");
+	const diffs = diffWorktrees(worktreeSetup, tasks.map((task) => task.agent), diffsDir);
+	return formatWorktreeDiffSummary(diffs);
+}
+
+async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Promise<SingleResult[]> {
+	return mapConcurrent(input.tasks, MAX_CONCURRENCY, async (task, index) => {
+		const overrideSkills = input.skillOverrides[index];
+		const effectiveSkills = overrideSkills === undefined ? input.behaviors[index]?.skills : overrideSkills;
+		const taskCwd = resolveParallelTaskCwd(task, input.paramsCwd, input.worktreeSetup, index);
+		return runSync(input.ctx.cwd, input.agents, task.agent, input.taskTexts[index]!, {
+			cwd: taskCwd,
+			signal: input.signal,
+			runId: input.runId,
+			index,
+			sessionDir: input.sessionDirForIndex(index),
+			sessionFile: input.sessionFileForIndex(index),
+			share: input.shareEnabled,
+			artifactsDir: input.artifactConfig.enabled ? input.artifactsDir : undefined,
+			artifactConfig: input.artifactConfig,
+			maxOutput: input.maxOutput,
+			modelOverride: input.modelOverrides[index],
+			skills: effectiveSkills === false ? [] : effectiveSkills,
+			onUpdate: input.onUpdate
+				? (progressUpdate) => {
+						const stepResults = progressUpdate.details?.results || [];
+						const stepProgress = progressUpdate.details?.progress || [];
+						if (stepResults.length > 0) input.liveResults[index] = stepResults[0];
+						if (stepProgress.length > 0) input.liveProgress[index] = stepProgress[0];
+						const mergedResults = input.liveResults.filter((result): result is SingleResult => result !== undefined);
+						const mergedProgress = input.liveProgress.filter((progress): progress is AgentProgress => progress !== undefined);
+						input.onUpdate?.({
+							content: progressUpdate.content,
+							details: {
+								mode: "parallel",
+								results: mergedResults,
+								progress: mergedProgress,
+								totalSteps: input.tasks.length,
+							},
+						});
+					}
+				: undefined,
+		});
+	});
+}
+
 async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): Promise<AgentToolResult<Details>> {
 	const {
 		params,
@@ -427,6 +650,12 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 			};
 		}
 		agentConfigs.push(config);
+	}
+
+	const effectiveCwd = params.cwd ?? ctx.cwd;
+	if (params.worktree) {
+		const worktreeTaskCwdError = buildParallelWorktreeTaskCwdError(tasks, effectiveCwd);
+		if (worktreeTaskCwdError) return buildParallelModeError(worktreeTaskCwdError);
 	}
 
 	let taskTexts = tasks.map((t) => t.task);
@@ -493,7 +722,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 				...(skillOverrides[i] !== undefined ? { skill: skillOverrides[i] } : {}),
 			}));
 			return executeAsyncChain(id, {
-				chain: [{ parallel: parallelTasks }],
+				chain: [{ parallel: parallelTasks, worktree: params.worktree }],
 				agents,
 				ctx: asyncCtx,
 				cwd: params.cwd,
@@ -508,85 +737,86 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 		}
 	}
 
-	const behaviors = agentConfigs.map((c) => resolveStepBehavior(c, {}));
+	const behaviors = agentConfigs.map((config) => resolveStepBehavior(config, {}));
 	const liveResults: (SingleResult | undefined)[] = new Array(tasks.length).fill(undefined);
 	const liveProgress: (AgentProgress | undefined)[] = new Array(tasks.length).fill(undefined);
-	if (params.context === "fork") {
-		for (let i = 0; i < taskTexts.length; i++) {
-			taskTexts[i] = wrapForkTask(taskTexts[i]!);
+	const { setup: worktreeSetup, errorResult } = createParallelWorktreeSetup(
+		params.worktree,
+		effectiveCwd,
+		runId,
+		tasks.length,
+	);
+	if (errorResult) return errorResult;
+
+	try {
+		if (params.context === "fork") {
+			for (let i = 0; i < taskTexts.length; i++) {
+				taskTexts[i] = wrapForkTask(taskTexts[i]!);
+			}
 		}
-	}
-	const results = await mapConcurrent(tasks, MAX_CONCURRENCY, async (t, i) => {
-		const overrideSkills = skillOverrides[i];
-		const effectiveSkills = overrideSkills === undefined ? behaviors[i]?.skills : overrideSkills;
-		return runSync(ctx.cwd, agents, t.agent, taskTexts[i]!, {
-			cwd: t.cwd ?? params.cwd,
+
+		const results = await runForegroundParallelTasks({
+			tasks,
+			taskTexts,
+			agents,
+			ctx,
 			signal,
 			runId,
-			index: i,
-			sessionDir: sessionDirForIndex(i),
-			sessionFile: sessionFileForIndex(i),
-			share: shareEnabled,
-			artifactsDir: artifactConfig.enabled ? artifactsDir : undefined,
+			sessionDirForIndex,
+			sessionFileForIndex,
+			shareEnabled,
 			artifactConfig,
+			artifactsDir,
 			maxOutput: params.maxOutput,
-			modelOverride: modelOverrides[i],
-			skills: effectiveSkills === false ? [] : effectiveSkills,
-			onUpdate: onUpdate
-				? (p) => {
-						const stepResults = p.details?.results || [];
-						const stepProgress = p.details?.progress || [];
-						if (stepResults.length > 0) liveResults[i] = stepResults[0];
-						if (stepProgress.length > 0) liveProgress[i] = stepProgress[0];
-						const mergedResults = liveResults.filter((r): r is SingleResult => r !== undefined);
-						const mergedProgress = liveProgress.filter((pg): pg is AgentProgress => pg !== undefined);
-						onUpdate({
-							content: p.content,
-							details: {
-								mode: "parallel",
-								results: mergedResults,
-								progress: mergedProgress,
-								totalSteps: tasks.length,
-							},
-						});
-					}
-				: undefined,
+			paramsCwd: params.cwd,
+			modelOverrides,
+			skillOverrides,
+			behaviors,
+			liveResults,
+			liveProgress,
+			onUpdate,
+			worktreeSetup,
 		});
-	});
-	for (let i = 0; i < results.length; i++) {
-		const run = results[i]!;
-		recordRun(run.agent, taskTexts[i]!, run.exitCode, run.progressSummary?.durationMs ?? 0);
+		for (let i = 0; i < results.length; i++) {
+			const run = results[i]!;
+			recordRun(run.agent, taskTexts[i]!, run.exitCode, run.progressSummary?.durationMs ?? 0);
+		}
+
+		for (const result of results) {
+			if (result.progress) allProgress.push(result.progress);
+			if (result.artifactPaths) allArtifactPaths.push(result.artifactPaths);
+		}
+
+		const worktreeSuffix = buildParallelWorktreeSuffix(worktreeSetup, artifactsDir, tasks);
+		const ok = results.filter((result) => result.exitCode === 0).length;
+		const downgradeNote = parallelDowngraded ? " (async not supported for parallel)" : "";
+		const aggregatedOutput = aggregateParallelOutputs(
+			results.map((result) => ({
+				agent: result.agent,
+				output: result.truncation?.text || getFinalOutput(result.messages),
+				exitCode: result.exitCode,
+				error: result.error,
+			})),
+			(i, agent) => `=== Task ${i + 1}: ${agent} ===`,
+		);
+
+		const summary = `${ok}/${results.length} succeeded${downgradeNote}`;
+		const fullContent = worktreeSuffix
+			? `${summary}\n\n${aggregatedOutput}\n\n${worktreeSuffix}`
+			: `${summary}\n\n${aggregatedOutput}`;
+
+		return {
+			content: [{ type: "text", text: fullContent }],
+			details: {
+				mode: "parallel",
+				results,
+				progress: params.includeProgress ? allProgress : undefined,
+				artifacts: allArtifactPaths.length ? { dir: artifactsDir, files: allArtifactPaths } : undefined,
+			},
+		};
+	} finally {
+		if (worktreeSetup) cleanupWorktrees(worktreeSetup);
 	}
-
-	for (const r of results) {
-		if (r.progress) allProgress.push(r.progress);
-		if (r.artifactPaths) allArtifactPaths.push(r.artifactPaths);
-	}
-
-	const ok = results.filter((r) => r.exitCode === 0).length;
-	const downgradeNote = parallelDowngraded ? " (async not supported for parallel)" : "";
-	const aggregatedOutput = aggregateParallelOutputs(
-		results.map((r) => ({
-			agent: r.agent,
-			output: r.truncation?.text || getFinalOutput(r.messages),
-			exitCode: r.exitCode,
-			error: r.error,
-		})),
-		(i, agent) => `=== Task ${i + 1}: ${agent} ===`,
-	);
-
-	const summary = `${ok}/${results.length} succeeded${downgradeNote}`;
-	const fullContent = `${summary}\n\n${aggregatedOutput}`;
-
-	return {
-		content: [{ type: "text", text: fullContent }],
-		details: {
-			mode: "parallel",
-			results,
-			progress: params.includeProgress ? allProgress : undefined,
-			artifacts: allArtifactPaths.length ? { dir: artifactsDir, files: allArtifactPaths } : undefined,
-		},
-	};
 }
 
 async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Promise<AgentToolResult<Details>> {
@@ -797,42 +1027,57 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			};
 		}
 
-		const scope: AgentScope = resolveExecutionAgentScope(params.agentScope);
+		const normalized = normalizeRepeatedParallelCounts(params);
+		if (normalized.error) return normalized.error;
+		const normalizedParams = normalized.params!;
+
+		const scope: AgentScope = resolveExecutionAgentScope(normalizedParams.agentScope);
 		const parentSessionFile = ctx.sessionManager.getSessionFile() ?? null;
 		deps.state.currentSessionId = parentSessionFile ?? `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 		const agents = deps.discoverAgents(ctx.cwd, scope).agents;
 		const runId = randomUUID().slice(0, 8);
-		const shareEnabled = params.share === true;
-		const hasChain = (params.chain?.length ?? 0) > 0;
-		const hasTasks = (params.tasks?.length ?? 0) > 0;
-		const hasSingle = Boolean(params.agent && params.task);
+		const shareEnabled = normalizedParams.share === true;
+		const hasChain = (normalizedParams.chain?.length ?? 0) > 0;
+		const hasTasks = (normalizedParams.tasks?.length ?? 0) > 0;
+		const hasSingle = Boolean(normalizedParams.agent && normalizedParams.task);
+		const allowClarifyTaskPrompt = hasChain
+			&& normalizedParams.clarify === true
+			&& ctx.hasUI
+			&& !(normalizedParams.chain?.some(isParallelStep) ?? false);
 
-		const validationError = validateExecutionInput(params, agents, hasChain, hasTasks, hasSingle);
+		const validationError = validateExecutionInput(
+			normalizedParams,
+			agents,
+			hasChain,
+			hasTasks,
+			hasSingle,
+			allowClarifyTaskPrompt,
+		);
 		if (validationError) return validationError;
 
 		let sessionFileForIndex: (idx?: number) => string | undefined = () => undefined;
 		try {
-			sessionFileForIndex = createForkContextResolver(ctx.sessionManager, params.context).sessionFileForIndex;
+			sessionFileForIndex = createForkContextResolver(ctx.sessionManager, normalizedParams.context).sessionFileForIndex;
 		} catch (error) {
-			return toExecutionErrorResult(params, error);
+			return toExecutionErrorResult(normalizedParams, error);
 		}
 
-		const requestedAsync = params.async ?? deps.asyncByDefault;
+		const requestedAsync = normalizedParams.async ?? deps.asyncByDefault;
 		const parallelDowngraded = hasTasks && requestedAsync;
 		let effectiveAsync = false;
 		if (requestedAsync && !hasTasks) {
-			effectiveAsync = hasChain ? params.clarify === false : params.clarify !== true;
+			effectiveAsync = hasChain ? normalizedParams.clarify === false : normalizedParams.clarify !== true;
 		}
 
 		const artifactConfig: ArtifactConfig = {
 			...DEFAULT_ARTIFACT_CONFIG,
-			enabled: params.artifacts !== false,
+			enabled: normalizedParams.artifacts !== false,
 		};
 		const artifactsDir = effectiveAsync ? deps.tempArtifactsDir : getArtifactsDir(parentSessionFile);
 
 		let sessionRoot: string;
-		if (params.sessionDir) {
-			sessionRoot = path.resolve(deps.expandTilde(params.sessionDir));
+		if (normalizedParams.sessionDir) {
+			sessionRoot = path.resolve(deps.expandTilde(normalizedParams.sessionDir));
 		} else {
 			const baseSessionRoot = deps.config.defaultSessionDir
 				? path.resolve(deps.expandTilde(deps.config.defaultSessionDir))
@@ -844,7 +1089,7 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			return toExecutionErrorResult(
-				params,
+				normalizedParams,
 				new Error(`Failed to create session directory '${sessionRoot}': ${message}`),
 			);
 		}
@@ -852,11 +1097,11 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 			path.join(sessionRoot, `run-${idx ?? 0}`);
 
 		const onUpdateWithContext = onUpdate
-			? (r: AgentToolResult<Details>) => onUpdate(withForkContext(r, params.context))
+			? (r: AgentToolResult<Details>) => onUpdate(withForkContext(r, normalizedParams.context))
 			: undefined;
 
 		const execData: ExecutionContextData = {
-			params,
+			params: normalizedParams,
 			ctx,
 			signal,
 			onUpdate: onUpdateWithContext,
@@ -874,28 +1119,28 @@ export function createSubagentExecutor(deps: ExecutorDeps): {
 
 		try {
 			const asyncResult = runAsyncPath(execData, deps);
-			if (asyncResult) return withForkContext(asyncResult, params.context);
+			if (asyncResult) return withForkContext(asyncResult, normalizedParams.context);
 
-			if (hasChain && params.chain) {
-				return withForkContext(await runChainPath(execData, deps), params.context);
+			if (hasChain && normalizedParams.chain) {
+				return withForkContext(await runChainPath(execData, deps), normalizedParams.context);
 			}
 
-			if (hasTasks && params.tasks) {
-				return withForkContext(await runParallelPath(execData, deps), params.context);
+			if (hasTasks && normalizedParams.tasks) {
+				return withForkContext(await runParallelPath(execData, deps), normalizedParams.context);
 			}
 
 			if (hasSingle) {
-				return withForkContext(await runSinglePath(execData, deps), params.context);
+				return withForkContext(await runSinglePath(execData, deps), normalizedParams.context);
 			}
 		} catch (error) {
-			return toExecutionErrorResult(params, error);
+			return toExecutionErrorResult(normalizedParams, error);
 		}
 
 		return withForkContext({
 			content: [{ type: "text", text: "Invalid params" }],
 			isError: true,
 			details: { mode: "single" as const, results: [] },
-		}, params.context);
+		}, normalizedParams.context);
 	};
 
 	return { execute };

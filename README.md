@@ -20,6 +20,22 @@ To remove:
 npx pi-subagents --remove
 ```
 
+If you use [pi-prompt-template-model](https://github.com/nicobailon/pi-prompt-template-model), you can wrap subagent delegation in a slash command:
+
+```markdown
+---
+description: Take a screenshot
+model: claude-sonnet-4-20250514
+subagent: browser-screenshoter
+cwd: /tmp/screenshots
+---
+Use url in the prompt to take screenshot: $@
+```
+
+Then `/take-screenshot https://example.com` switches to Sonnet, delegates to the `browser-screenshoter` agent with `/tmp/screenshots` as the working directory, and restores your model when done. Runtime overrides like `--cwd=<path>` and `--subagent=<name>` work too.
+
+pi-prompt-template-model is entirely optional — pi-subagents works standalone through the `subagent` tool and slash commands. If you want reusable prompt-template workflows on top of subagents, including `/chain-prompts` and compare-style prompts like `pi-prompt-template-model`'s `/best-of-n` example, install [pi-prompt-template-model](https://github.com/nicobailon/pi-prompt-template-model) separately and copy any example prompts you want from its `examples/` directory into `~/.pi/agent/prompts/`.
+
 ## Agents
 
 Agents are markdown files with YAML frontmatter that define specialized subagent configurations.
@@ -81,9 +97,11 @@ Semantics:
 
 When `extensions` is present, it takes precedence over extension paths implied by `tools` entries.
 
-**MCP Tools**
+**MCP Tools (optional)**
 
-Agents can use MCP server tools directly (requires the [pi-mcp-adapter](https://github.com/nicobailon/pi-mcp-adapter) extension). Add `mcp:` prefixed entries to the `tools` field:
+If you have the [pi-mcp-adapter](https://github.com/nicobailon/pi-mcp-adapter) extension installed, subagents can use MCP server tools directly. Without that extension, everything below is ignored — MCP integration is entirely optional.
+
+Add `mcp:` prefixed entries to the `tools` field in agent frontmatter:
 
 ```yaml
 # All tools from a server
@@ -102,7 +120,7 @@ The `mcp:` items are additive — they don't affect which builtins the agent get
 
 Subagents only get direct MCP tools when `mcp:` items are explicitly listed. Even if your `mcp.json` has `directTools: true` globally, a subagent without `mcp:` in its frontmatter won't get any direct tools — keeping it lean. The `mcp` proxy tool is still available for discovery if needed.
 
-The MCP adapter's metadata cache must be populated for direct tools to work. On the first session with a new MCP server, tools will only be available through the `mcp` proxy. Restart Pi after the first session and direct tools become available.
+> **First-run caveat:** The MCP adapter caches tool metadata at startup. The first time you connect to a new MCP server, that cache is empty, so tools are only available through the generic `mcp` proxy. After that first session, restart pi and direct tools become available.
 
 **Resolution priority:** step override > agent frontmatter > disabled
 
@@ -113,6 +131,7 @@ The MCP adapter's metadata cache must be populated for direct tools to work. On 
 | `/run <agent> <task>` | Run a single agent with a task |
 | `/chain agent1 "task1" -> agent2 "task2"` | Run agents in sequence with per-step tasks |
 | `/parallel agent1 "task1" -> agent2 "task2"` | Run agents in parallel with per-step tasks |
+| `/subagents-status` | Open the async status overlay for active and recent runs |
 | `/agents` | Open the Agents Manager overlay |
 
 All commands validate agent names locally and tab-complete them, then route through the tool framework for full live progress rendering. Results are sent to the conversation for the LLM to discuss.
@@ -172,7 +191,7 @@ Add `--bg` at the end of any slash command to run in the background:
 /parallel scout "scan frontend" -> scout "scan backend" -> scout "scan infra" --bg
 ```
 
-Without `--bg`, the run is foreground: the tool call stays active and streams progress until completion. With `--bg`, the run is launched asynchronously: control returns immediately, and completion arrives later via notification. In both cases subagents run as separate processes. Check status with `subagent_status`.
+Without `--bg`, the run is foreground: the tool call stays active and streams progress until completion. With `--bg`, the run is launched asynchronously: control returns immediately, and completion arrives later via notification. In both cases subagents run as separate processes. Check status with the `subagent_status` tool, or open the `/subagents-status` slash command for a read-only overlay listing active runs and recent completions.
 
 ### Forked Context Execution
 
@@ -282,6 +301,7 @@ Chains can be created from the Agents Manager template picker ("Blank Chain"), o
 - **Agent Templates**: Create agents from presets (Scout, Planner, Implementer, Code Reviewer, Blank Chain)
 - **Skill Injection**: Agents declare skills in frontmatter; skills get injected into system prompts
 - **Parallel-in-Chain**: Fan-out/fan-in patterns with `{ parallel: [...] }` steps within chains
+- **Worktree Isolation**: `worktree: true` gives each parallel agent its own git worktree, preventing filesystem conflicts during concurrent execution
 - **Chain Clarification TUI**: Interactive preview/edit of chain templates and behaviors before execution
 - **Agent Frontmatter Extensions**: Agents declare default chain behavior (`output`, `defaultReads`, `defaultProgress`, `skill`)
 - **Chain Artifacts**: Shared directory at `<tmpdir>/pi-chain-runs/{runId}/` for inter-step files
@@ -409,7 +429,9 @@ Skills are specialized instructions loaded from SKILL.md files and injected into
 
 ## Usage
 
-**subagent tool:**
+These are the parameters the **LLM agent** passes when it calls the `subagent` tool — not something you type directly. The agent decides to use these based on your conversation. For user-facing commands, see [Quick Commands](#quick-commands) above.
+
+**subagent tool parameters:**
 ```typescript
 // Single agent
 { agent: "worker", task: "refactor auth" }
@@ -421,6 +443,9 @@ Skills are specialized instructions loaded from SKILL.md files and injected into
 
 // Parallel
 { tasks: [{ agent: "scout", task: "a" }, { agent: "scout", task: "b" }] }
+
+// Parallel with count shorthand (run the same task 3 times)
+{ tasks: [{ agent: "scout", task: "audit auth", count: 3 }] }
 
 // Parallel with forked context (each task gets its own isolated fork)
 { tasks: [{ agent: "scout", task: "audit frontend" }, { agent: "reviewer", task: "audit backend" }], context: "fork" }
@@ -452,7 +477,7 @@ Skills are specialized instructions loaded from SKILL.md files and injected into
 { chain: [
   { agent: "scout", task: "Gather context for the codebase" },
   { parallel: [
-    { agent: "worker", task: "Implement auth based on {previous}" },
+    { agent: "worker", task: "Implement auth based on {previous}", count: 2 },
     { agent: "worker", task: "Implement API based on {previous}" }
   ]},
   { agent: "reviewer", task: "Review all changes from {previous}" }
@@ -468,6 +493,22 @@ Skills are specialized instructions loaded from SKILL.md files and injected into
   ], concurrency: 2, failFast: true }  // limit concurrency, stop on first failure
 ]}
 
+// Worktree isolation — each parallel agent gets its own git worktree
+{ tasks: [
+  { agent: "worker", task: "Implement auth" },
+  { agent: "worker", task: "Implement API" }
+], worktree: true }
+
+// Worktree isolation in a chain (fan-out with isolation, fan-in for review)
+{ chain: [
+  { agent: "scout", task: "Gather context" },
+  { parallel: [
+    { agent: "worker", task: "Implement feature A based on {previous}" },
+    { agent: "worker", task: "Implement feature B based on {previous}" }
+  ], worktree: true },
+  { agent: "reviewer", task: "Review changes from {previous}" }
+]}
+
 // Async chain with parallel step (runs in background)
 { chain: [
   { agent: "scout", task: "Gather context" },
@@ -481,9 +522,14 @@ Skills are specialized instructions loaded from SKILL.md files and injected into
 
 **subagent_status tool:**
 ```typescript
-{ id: "a53ebe46" }
+{ action: "list" }                    // active async runs only
+{ id: "a53ebe46" }                    // inspect one run
 { dir: "<tmpdir>/pi-async-subagent-runs/a53ebe46-..." }
 ```
+
+**/subagents-status slash command:**
+
+Opens a small read-only overlay that shows active async runs plus recent completed/failed runs. It auto-refreshes every 2 seconds while open, keeps the current run selected when possible, and uses `↑↓` to select a run plus `Esc` to close.
 
 ## Management Actions
 
@@ -558,7 +604,8 @@ Notes:
 | `output` | `string \| false` | agent default | Override output file for single agent (absolute path as-is, relative path resolved against cwd) |
 | `skill` | `string \| string[] \| false` | agent default | Override skills (comma-separated string, array, or false to disable) |
 | `model` | string | agent default | Override model for single agent |
-| `tasks` | `{agent, task, cwd?, skill?}[]` | - | Parallel tasks (sync only) |
+| `tasks` | `{agent, task, cwd?, count?, skill?}[]` | - | Parallel tasks. Foreground runs directly; background requests are converted to an equivalent chain. `count` repeats one task entry N times with the same settings. |
+| `worktree` | boolean | false | Create isolated git worktrees for each parallel task. Requires clean git state. Per-worktree diffs included in output. |
 | `chain` | ChainItem[] | - | Sequential steps with behavior overrides (see below) |
 | `context` | `"fresh" \| "fork"` | `fresh` | Execution context mode. `fork` uses a real branched session from the parent's current leaf for each child run |
 | `chainDir` | string | `<tmpdir>/pi-chain-runs/` | Persistent directory for chain artifacts (default auto-cleaned after 24h) |
@@ -596,6 +643,7 @@ Notes:
 | `parallel` | ParallelTask[] | required | Array of tasks to run concurrently |
 | `concurrency` | number | 4 | Max concurrent tasks |
 | `failFast` | boolean | false | Stop remaining tasks on first failure |
+| `worktree` | boolean | false | Create isolated git worktrees for each parallel task |
 
 *ParallelTask fields:* (same as sequential step)
 
@@ -604,6 +652,7 @@ Notes:
 | `agent` | string | required | Agent name |
 | `task` | string | `{previous}` | Task template |
 | `cwd` | string | - | Override working directory |
+| `count` | number | 1 | Repeat this parallel task N times with the same settings |
 | `output` | `string \| false` | agent default | Override output (namespaced to parallel-N/M-agent/) |
 | `reads` | `string[] \| false` | agent default | Override files to read |
 | `progress` | boolean | agent default | Override progress tracking |
@@ -614,7 +663,48 @@ Status tool:
 
 | Tool | Description |
 |------|-------------|
-| `subagent_status` | Inspect async run status by id or dir |
+| `subagent_status` | List active async runs or inspect one run by id or dir |
+
+## Worktree Isolation
+
+When multiple agents run in parallel against the same repo, they can clobber each other's file changes. Pass `worktree: true` to give each parallel agent its own git worktree branched from HEAD.
+
+```typescript
+// Top-level parallel with worktree isolation
+{ tasks: [
+  { agent: "worker", task: "Implement auth", count: 2 },
+  { agent: "worker", task: "Implement API" }
+], worktree: true }
+
+// Chain with worktree-isolated parallel step
+{ chain: [
+  { agent: "scout", task: "Gather context" },
+  { parallel: [
+    { agent: "worker", task: "Implement feature A based on {previous}" },
+    { agent: "worker", task: "Implement feature B based on {previous}" }
+  ], worktree: true },
+  { agent: "reviewer", task: "Review all changes from {previous}" }
+]}
+```
+
+After the parallel step completes, per-agent diff stats are appended to the output (and become `{previous}` for the next chain step). Full patch files are written to disk. The caller or next step can decide what to keep.
+
+**Requirements:**
+
+- Must be inside a git repository
+- Working tree must be clean (no uncommitted changes) — commit or stash first
+- `node_modules/` is symlinked into each worktree to avoid reinstalling
+- Worktree runs use the shared parallel/step `cwd`. Task-level `cwd` overrides must be omitted or match that shared `cwd`; if you need different working directories, disable `worktree` or split the run.
+
+**What happens under the hood:**
+
+1. `git worktree add` creates a temporary worktree per agent in `<tmpdir>/pi-worktree-*`
+2. Each agent runs in its worktree's cwd (preserving subdirectory context)
+3. After execution, `git add -A && git diff --cached` captures all changes (committed, modified, and new files)
+4. Diff stats appear in the aggregated output; full `.patch` files are written to the artifacts directory
+5. Worktrees and temp branches are cleaned up in a `finally` block
+
+If you use [pi-prompt-template-model](https://github.com/nicobailon/pi-prompt-template-model), worktree isolation is also available via `worktree: true` in chain template frontmatter or the `--worktree` CLI flag on `chain-prompts`. `pi-prompt-template-model` compare-style prompts can route through the same worktree machinery too; see the `pi-prompt-template-model` README and `examples/` directory for the installable prompt templates.
 
 ## Chain Variables
 
@@ -752,13 +842,17 @@ Async runs write a dedicated observability folder:
   subagent-log-<id>.md
 ```
 
-`status.json` is the source of truth for async progress and powers the TUI widget. If you already use
-`/status <id>` you can keep doing that; otherwise use:
+`status.json` is the source of truth for async progress and powers both the TUI widget and `/subagents-status`. Async status and result files are written atomically, so readers do not observe partial JSON during background updates.
+
+For programmatic access:
 
 ```typescript
+subagent_status({ action: "list" })
 subagent_status({ id: "<id>" })
 subagent_status({ dir: "<tmpdir>/pi-async-subagent-runs/<id>" })
 ```
+
+For an interactive overview, run the `/subagents-status` slash command to open the overlay listing active runs and recent completed/failed runs. The overlay auto-refreshes every 2 seconds while it is open.
 
 ## Events
 
@@ -779,8 +873,10 @@ Async events:
 ├── chain-execution.ts            # Chain orchestration (sequential + parallel)
 ├── chain-serializer.ts           # Parse/serialize .chain.md files
 ├── async-execution.ts            # Async/background execution support
+├── async-status.ts               # Async run discovery, listing, and formatting
 ├── execution.ts                  # Core runSync, applyThinkingSuffix
 ├── render.ts                     # TUI rendering (widget, tool result display)
+├── subagents-status.ts           # Async status overlay component
 ├── artifacts.ts                  # Artifact management
 ├── formatters.ts                 # Output formatting utilities
 ├── schemas.ts                    # TypeBox parameter schemas
@@ -788,6 +884,7 @@ Async events:
 ├── types.ts                      # Shared types and constants
 ├── subagent-runner.ts            # Async runner (detached process)
 ├── parallel-utils.ts             # Parallel execution utilities for async runner
+├── worktree.ts                   # Git worktree isolation for parallel execution
 ├── pi-spawn.ts                   # Cross-platform pi CLI spawning
 ├── single-output.ts              # Solo agent output file handling
 ├── notify.ts                     # Async completion notifications
@@ -807,5 +904,9 @@ Async events:
 ├── agent-templates.ts            # Agent/chain creation templates
 ├── render-helpers.ts             # Shared pad/row/header/footer helpers
 ├── run-history.ts                # Per-agent run recording (JSONL)
+├── test/unit/                    # Fast unit tests for pure modules
+├── test/integration/             # Loader-based execution/integration tests
+├── test/e2e/                     # End-to-end sandbox tests
+├── test/support/                 # Shared test loader, helpers, and mock pi harness
 └── text-editor.ts                # Shared text editor (word nav, paste)
 ```

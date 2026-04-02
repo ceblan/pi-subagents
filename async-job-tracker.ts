@@ -30,23 +30,29 @@ export function createAsyncJobTracker(state: SubagentState, asyncDirRoot: string
 				if (job.status === "complete" || job.status === "failed") {
 					continue;
 				}
-				const status = readStatus(job.asyncDir);
-				if (status) {
-					job.status = status.state;
-					job.mode = status.mode;
-					job.currentStep = status.currentStep ?? job.currentStep;
-					job.stepsTotal = status.steps?.length ?? job.stepsTotal;
-					job.startedAt = status.startedAt ?? job.startedAt;
-					job.updatedAt = status.lastUpdate ?? Date.now();
-					if (status.steps?.length) {
-						job.agents = status.steps.map((step) => step.agent);
+				try {
+					const status = readStatus(job.asyncDir);
+					if (status) {
+						job.status = status.state;
+						job.mode = status.mode;
+						job.currentStep = status.currentStep ?? job.currentStep;
+						job.stepsTotal = status.steps?.length ?? job.stepsTotal;
+						job.startedAt = status.startedAt ?? job.startedAt;
+						job.updatedAt = status.lastUpdate ?? Date.now();
+						if (status.steps?.length) {
+							job.agents = status.steps.map((step) => step.agent);
+						}
+						job.sessionDir = status.sessionDir ?? job.sessionDir;
+						job.outputFile = status.outputFile ?? job.outputFile;
+						job.totalTokens = status.totalTokens ?? job.totalTokens;
+						job.sessionFile = status.sessionFile ?? job.sessionFile;
+						continue;
 					}
-					job.sessionDir = status.sessionDir ?? job.sessionDir;
-					job.outputFile = status.outputFile ?? job.outputFile;
-					job.totalTokens = status.totalTokens ?? job.totalTokens;
-					job.sessionFile = status.sessionFile ?? job.sessionFile;
-				} else {
 					job.status = job.status === "queued" ? "running" : job.status;
+					job.updatedAt = Date.now();
+				} catch (error) {
+					console.error(`Failed to read async status for '${job.asyncDir}':`, error);
+					job.status = "failed";
 					job.updatedAt = Date.now();
 				}
 			}

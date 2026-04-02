@@ -4,7 +4,7 @@
 
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import { getMarkdownTheme, type ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { Container, Markdown, Spacer, Text, truncateToWidth, visibleWidth, type Widget } from "@mariozechner/pi-tui";
+import { Container, Markdown, Spacer, Text, visibleWidth, type Component } from "@mariozechner/pi-tui";
 import {
 	type AsyncJobState,
 	type Details,
@@ -179,7 +179,7 @@ export function renderSubagentResult(
 	result: AgentToolResult<Details>,
 	_options: { expanded: boolean },
 	theme: Theme,
-): Widget {
+): Component {
 	const d = result.details;
 	if (!d || !d.results.length) {
 		const t = result.content[0];
@@ -219,6 +219,36 @@ export function renderSubagentResult(
 			new Text(truncLine(theme.fg("dim", `Task: ${taskPreview}`), w), 0, 0),
 		);
 		c.addChild(new Spacer(1));
+
+		if (isRunning && r.progress) {
+			if (r.progress.currentTool) {
+				const maxToolArgsLen = Math.max(50, w - 20);
+				const toolArgsPreview = r.progress.currentToolArgs
+					? (r.progress.currentToolArgs.length > maxToolArgsLen
+						? `${r.progress.currentToolArgs.slice(0, maxToolArgsLen)}...`
+						: r.progress.currentToolArgs)
+					: "";
+				const toolLine = toolArgsPreview
+					? `${r.progress.currentTool}: ${toolArgsPreview}`
+					: r.progress.currentTool;
+				c.addChild(new Text(truncLine(theme.fg("warning", `> ${toolLine}`), w), 0, 0));
+			}
+			if (r.progress.recentTools?.length) {
+				for (const t of r.progress.recentTools.slice(-3)) {
+					const maxArgsLen = Math.max(40, w - 24);
+					const argsPreview = t.args.length > maxArgsLen
+						? `${t.args.slice(0, maxArgsLen)}...`
+						: t.args;
+					c.addChild(new Text(truncLine(theme.fg("dim", `${t.tool}: ${argsPreview}`), w), 0, 0));
+				}
+			}
+			for (const line of (r.progress.recentOutput ?? []).slice(-5)) {
+				c.addChild(new Text(truncLine(theme.fg("dim", `  ${line}`), w), 0, 0));
+			}
+			if (r.progress.currentTool || r.progress.recentTools?.length || r.progress.recentOutput?.length) {
+				c.addChild(new Spacer(1));
+			}
+		}
 
 		const items = getDisplayItems(r.messages);
 		for (const item of items) {
@@ -417,7 +447,7 @@ export function renderSubagentResult(
 			}
 			// Recent tools
 			if (rProg.recentTools?.length) {
-				for (const t of rProg.recentTools.slice(0, 3)) {
+				for (const t of rProg.recentTools.slice(-3)) {
 					const maxArgsLen = Math.max(40, w - 30);
 					const argsPreview = t.args.length > maxArgsLen
 						? `${t.args.slice(0, maxArgsLen)}...`

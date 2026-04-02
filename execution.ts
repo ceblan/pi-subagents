@@ -139,48 +139,15 @@ export async function runSync(
 		closeJsonlWriter = () => jsonlWriter.close();
 		let buf = "";
 
-		// Throttled update mechanism - consolidates all updates
-		let lastUpdateTime = 0;
-		let updatePending = false;
-		let pendingTimer: ReturnType<typeof setTimeout> | null = null;
 		let processClosed = false;
-		const UPDATE_THROTTLE_MS = 50; // Reduced from 75ms for faster responsiveness
 
-		const scheduleUpdate = () => {
+		const fireUpdate = () => {
 			if (!onUpdate || processClosed) return;
-			const now = Date.now();
-			const elapsed = now - lastUpdateTime;
-
-			if (elapsed >= UPDATE_THROTTLE_MS) {
-				// Enough time passed, update immediately
-				// Clear any pending timer to avoid double-updates
-				if (pendingTimer) {
-					clearTimeout(pendingTimer);
-					pendingTimer = null;
-				}
-				lastUpdateTime = now;
-				updatePending = false;
-				progress.durationMs = now - startTime;
-				onUpdate({
-					content: [{ type: "text", text: getFinalOutput(result.messages) || "(running...)" }],
-					details: { mode: "single", results: [result], progress: [progress] },
-				});
-			} else if (!updatePending) {
-				// Schedule update for later
-				updatePending = true;
-				pendingTimer = setTimeout(() => {
-					pendingTimer = null;
-					if (updatePending && !processClosed) {
-						updatePending = false;
-						lastUpdateTime = Date.now();
-						progress.durationMs = Date.now() - startTime;
-						onUpdate({
-							content: [{ type: "text", text: getFinalOutput(result.messages) || "(running...)" }],
-							details: { mode: "single", results: [result], progress: [progress] },
-						});
-					}
-				}, UPDATE_THROTTLE_MS - elapsed);
-			}
+			progress.durationMs = Date.now() - startTime;
+			onUpdate({
+				content: [{ type: "text", text: getFinalOutput(result.messages) || "(running...)" }],
+				details: { mode: "single", results: [result], progress: [progress] },
+			});
 		};
 
 		const processLine = (line: string) => {
@@ -195,25 +162,20 @@ export async function runSync(
 					progress.toolCount++;
 					progress.currentTool = evt.toolName;
 					progress.currentToolArgs = extractToolArgsPreview((evt.args || {}) as Record<string, unknown>);
-					// Tool start is important - update immediately by forcing throttle reset
-					lastUpdateTime = 0;
-					scheduleUpdate();
+					fireUpdate();
 				}
 
 				if (evt.type === "tool_execution_end") {
 					if (progress.currentTool) {
-						progress.recentTools.unshift({
+						progress.recentTools.push({
 							tool: progress.currentTool,
 							args: progress.currentToolArgs || "",
 							endMs: now,
 						});
-						if (progress.recentTools.length > 5) {
-							progress.recentTools.pop();
-						}
 					}
 					progress.currentTool = undefined;
 					progress.currentToolArgs = undefined;
-					scheduleUpdate();
+					fireUpdate();
 				}
 
 				if (evt.type === "message_end" && evt.message) {
@@ -245,7 +207,7 @@ export async function runSync(
 							}
 						}
 					}
-					scheduleUpdate();
+					fireUpdate();
 				}
 				if (evt.type === "tool_result_end" && evt.message) {
 					result.messages.push(evt.message);
@@ -262,7 +224,7 @@ export async function runSync(
 							progress.recentOutput.splice(0, progress.recentOutput.length - 50);
 						}
 					}
-					scheduleUpdate();
+					fireUpdate();
 				}
 			} catch {
 				// Non-JSON stdout lines are expected; only structured events are parsed.
@@ -276,19 +238,12 @@ export async function runSync(
 			const lines = buf.split("\n");
 			buf = lines.pop() || "";
 			lines.forEach(processLine);
-
-			// Also schedule an update on data received (handles streaming output)
-			scheduleUpdate();
 		});
 		proc.stderr.on("data", (d) => {
 			stderrBuf += d.toString();
 		});
 		proc.on("close", (code) => {
 			processClosed = true;
-			if (pendingTimer) {
-				clearTimeout(pendingTimer);
-				pendingTimer = null;
-			}
 			if (buf.trim()) processLine(buf);
 			if (code !== 0 && stderrBuf.trim() && !result.error) {
 				result.error = stderrBuf.trim();

@@ -24,6 +24,7 @@ export interface ParallelStepGroup {
 	parallel: RunnerSubagentStep[];
 	concurrency?: number;
 	failFast?: boolean;
+	worktree?: boolean;
 }
 
 export type RunnerStep = RunnerSubagentStep | ParallelStepGroup;
