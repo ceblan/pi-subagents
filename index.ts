@@ -465,12 +465,6 @@ MANAGEMENT (use action field, omit agent/task/chain/tasks):
 	pi.on("session_start", (_event, ctx) => {
 		resetSessionState(ctx);
 	});
-	pi.on("session_switch", (_event, ctx) => {
-		resetSessionState(ctx);
-	});
-	pi.on("session_branch", (_event, ctx) => {
-		resetSessionState(ctx);
-	});
 	pi.on("session_shutdown", () => {
 		stopResultWatcher();
 		if (state.poller) clearInterval(state.poller);
