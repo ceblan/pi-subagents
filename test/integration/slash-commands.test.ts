@@ -143,15 +143,24 @@ describe("slash command custom message delivery", { skip: !available ? "slash-co
 		registerSlashCommands!(pi, createState(process.cwd()));
 		await commands.get("run")!.handler("scout inspect this", createCommandContext());
 
-		assert.equal(sent.length, 2);
+		// Message 0: original prompt (emitOriginalSlashPrompt)
+		// Message 1: initial result (buildSlashInitialResult)
+		// Message 2: final result (response)
+		assert.equal(sent.length, 3);
 		assert.equal((sent[0] as { customType?: string; display?: boolean }).customType, SLASH_RESULT_TYPE);
 		assert.equal((sent[0] as { display?: boolean }).display, true);
-		assert.equal((sent[0] as { content?: string }).content, "inspect this");
-		assert.equal((sent[1] as { customType?: string; display?: boolean }).customType, SLASH_RESULT_TYPE);
-		assert.equal((sent[1] as { display?: boolean }).display, false);
-		assert.equal((sent[1] as { content?: string }).content, "Scout finished");
+		assert.equal((sent[0] as { content?: string }).content, "/run scout inspect this");
+		assert.equal((sent[0] as { details?: { type?: string } }).details?.type, "slash-prompt");
 
-		const visibleDetails = resolveSlashMessageDetails!((sent[0] as { details?: unknown }).details);
+		assert.equal((sent[1] as { customType?: string; display?: boolean }).customType, SLASH_RESULT_TYPE);
+		assert.equal((sent[1] as { display?: boolean }).display, true);
+		// Message 1 contains the initial "Running subagent..." text or extracted task
+
+		assert.equal((sent[2] as { customType?: string; display?: boolean }).customType, SLASH_RESULT_TYPE);
+		assert.equal((sent[2] as { display?: boolean }).display, false);
+		assert.equal((sent[2] as { content?: string }).content, "Scout finished");
+
+		const visibleDetails = resolveSlashMessageDetails!((sent[1] as { details?: unknown }).details);
 		assert.ok(visibleDetails);
 		const visibleSnapshot = getSlashRenderableSnapshot!(visibleDetails!);
 		assert.equal((visibleSnapshot.result.content[0] as { text?: string }).text, "Scout finished");
@@ -189,15 +198,23 @@ describe("slash command custom message delivery", { skip: !available ? "slash-co
 		registerSlashCommands!(pi, createState(process.cwd()));
 		await commands.get("run")!.handler("scout inspect this", createCommandContext());
 
-		assert.equal(sent.length, 2);
+		// Message 0: original prompt (emitOriginalSlashPrompt)
+		// Message 1: initial result (buildSlashInitialResult)
+		// Message 2: final result (response)
+		assert.equal(sent.length, 3);
 		assert.equal((sent[0] as { customType?: string; display?: boolean }).customType, SLASH_RESULT_TYPE);
 		assert.equal((sent[0] as { display?: boolean }).display, true);
-		assert.equal((sent[0] as { content?: string }).content, "inspect this");
-		assert.equal((sent[1] as { customType?: string; display?: boolean }).customType, SLASH_RESULT_TYPE);
-		assert.equal((sent[1] as { display?: boolean }).display, false);
-		assert.equal((sent[1] as { content?: string }).content, "Subagent failed");
+		assert.equal((sent[0] as { content?: string }).content, "/run scout inspect this");
+		assert.equal((sent[0] as { details?: { type?: string } }).details?.type, "slash-prompt");
 
-		const visibleDetails = resolveSlashMessageDetails!((sent[0] as { details?: unknown }).details);
+		assert.equal((sent[1] as { customType?: string; display?: boolean }).customType, SLASH_RESULT_TYPE);
+		assert.equal((sent[1] as { display?: boolean }).display, true);
+
+		assert.equal((sent[2] as { customType?: string; display?: boolean }).customType, SLASH_RESULT_TYPE);
+		assert.equal((sent[2] as { display?: boolean }).display, false);
+		assert.equal((sent[2] as { content?: string }).content, "Subagent failed");
+
+		const visibleDetails = resolveSlashMessageDetails!((sent[1] as { details?: unknown }).details);
 		assert.ok(visibleDetails);
 		const visibleSnapshot = getSlashRenderableSnapshot!(visibleDetails!);
 		assert.equal((visibleSnapshot.result.content[0] as { text?: string }).text, "Subagent failed");

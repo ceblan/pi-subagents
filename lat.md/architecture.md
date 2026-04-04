@@ -6,7 +6,7 @@ The extension is organized into clearly scoped modules. Each module has a single
 
 [[index.ts]] is the main extension module. It registers both tools, initializes the result watcher, async job tracker, slash command bridges, and session lifecycle hooks.
 
-Global mutable state is kept in a single `SubagentState` object defined in [[types.ts]]. Session hooks (`session_start`, `session_switch`, `session_branch`, `session_shutdown`) reset this state and trigger cleanup.
+Global mutable state is kept in a single `SubagentState` object defined in [[types.ts]]. Session hooks (`session_start`, `session_shutdown`) reset this state and trigger cleanup.
 
 ## Module Map
 
@@ -89,7 +89,7 @@ Schemas and types:
 
 All per-session mutable state lives in a single `SubagentState` object (defined in [[types.ts#SubagentState]]) owned by the extension and passed to collaborating modules.
 
-It holds: `baseCwd`, `currentSessionId`, `asyncJobs` map, `cleanupTimers`, `lastUiContext`, async file watcher, poller handle, completion deduplication map, and the result file coalescer. State is reset on `session_start`, `session_switch`, and `session_branch` events.
+It holds: `baseCwd`, `currentSessionId`, `asyncJobs` map, `cleanupTimers`, `lastUiContext`, async file watcher, poller handle, completion deduplication map, and the result file coalescer. State is reset on `session_start` events.
 
 ## Process Model
 
