@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-04-04
+
+### Changed
+- Bumped pi package devDependencies to `^0.65.0` (`@mariozechner/pi-agent-core`, `@mariozechner/pi-ai`, `@mariozechner/pi-coding-agent`) to stay aligned with current pi SDK/runtime.
+
 ## [0.12.1] - 2026-04-03
 
 ### Changed
