@@ -9,11 +9,11 @@ import {
 	type ChainConfig,
 	type ChainStepConfig,
 	discoverAgentsAll,
-} from "./agents.js";
-import { serializeAgent } from "./agent-serializer.js";
-import { serializeChain } from "./chain-serializer.js";
-import { discoverAvailableSkills } from "./skills.js";
-import type { Details } from "./types.js";
+} from "./agents.ts";
+import { serializeAgent } from "./agent-serializer.ts";
+import { serializeChain } from "./chain-serializer.ts";
+import { discoverAvailableSkills } from "./skills.ts";
+import type { Details } from "./types.ts";
 
 type ManagementAction = "list" | "get" | "create" | "update" | "delete";
 type ManagementScope = "user" | "project";
@@ -235,6 +235,12 @@ function applyAgentConfig(target: AgentConfig, cfg: Record<string, unknown>): st
 		if (typeof cfg.progress !== "boolean") return "config.progress must be a boolean when provided.";
 		target.defaultProgress = cfg.progress;
 	}
+	if (hasKey(cfg, "maxSubagentDepth")) {
+		if (cfg.maxSubagentDepth === false || cfg.maxSubagentDepth === "") target.maxSubagentDepth = undefined;
+		else if (typeof cfg.maxSubagentDepth === "number" && Number.isInteger(cfg.maxSubagentDepth) && cfg.maxSubagentDepth >= 0) {
+			target.maxSubagentDepth = cfg.maxSubagentDepth;
+		} else return "config.maxSubagentDepth must be an integer >= 0 or false when provided.";
+	}
 	return undefined;
 }
 
@@ -293,6 +299,7 @@ export function formatAgentDetail(agent: AgentConfig): string {
 	if (agent.output) lines.push(`Output: ${agent.output}`);
 	if (agent.defaultReads?.length) lines.push(`Reads: ${agent.defaultReads.join(", ")}`);
 	if (agent.defaultProgress) lines.push("Progress: true");
+	if (agent.maxSubagentDepth !== undefined) lines.push(`Max subagent depth: ${agent.maxSubagentDepth}`);
 	if (agent.systemPrompt.trim()) lines.push("", "System Prompt:", agent.systemPrompt);
 	return lines.join("\n");
 }

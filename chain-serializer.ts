@@ -1,5 +1,5 @@
-import type { ChainConfig, ChainStepConfig } from "./agents.js";
-import { parseFrontmatter } from "./frontmatter.js";
+import type { ChainConfig, ChainStepConfig } from "./agents.ts";
+import { parseFrontmatter } from "./frontmatter.ts";
 
 function parseStepBody(agent: string, sectionBody: string): ChainStepConfig {
 	const lines = sectionBody.split("\n");

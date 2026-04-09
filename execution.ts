@@ -4,13 +4,13 @@
 
 import { spawn } from "node:child_process";
 import type { Message } from "@mariozechner/pi-ai";
-import type { AgentConfig } from "./agents.js";
+import type { AgentConfig } from "./agents.ts";
 import {
 	ensureArtifactsDir,
 	getArtifactPaths,
 	writeArtifact,
 	writeMetadata,
-} from "./artifacts.js";
+} from "./artifacts.ts";
 import {
 	type AgentProgress,
 	type ArtifactPaths,
@@ -19,7 +19,7 @@ import {
 	DEFAULT_MAX_OUTPUT,
 	truncateOutput,
 	getSubagentDepthEnv,
-} from "./types.js";
+} from "./types.ts";
 import {
 	getFinalOutput,
 	findLatestSessionFile,
@@ -32,6 +32,7 @@ import { getPiSpawnCommand } from "./pi-spawn.js";
 import { createJsonlWriter } from "./jsonl-writer.js";
 import { applyThinkingSuffix, buildPiArgs, cleanupTempDir } from "./pi-args.js";
 import { runSyncTmux, isTmux } from "./execution-tmux.js";
+import { captureSingleOutputSnapshot, resolveSingleOutput } from "./single-output.ts";
 
 /**
  * Run a subagent synchronously (blocking until complete)
@@ -60,6 +61,7 @@ export async function runSync(
 	const sessionEnabled = Boolean(options.sessionFile || options.sessionDir) || shareEnabled;
 	const effectiveModel = modelOverride ?? agent.model;
 	const modelArg = applyThinkingSuffix(effectiveModel, agent.thinking);
+	const outputSnapshot = captureSingleOutputSnapshot(options.outputPath);
 
 	const skillNames = options.skills ?? agent.skills ?? [];
 	const { resolved: resolvedSkills, missing: missingSkills } = resolveSkills(skillNames, runtimeCwd);
@@ -141,7 +143,7 @@ export async function runSync(
 		}
 	}
 
-	const spawnEnv = { ...process.env, ...sharedEnv, ...getSubagentDepthEnv() };
+	const spawnEnv = { ...process.env, ...sharedEnv, ...getSubagentDepthEnv(options.maxSubagentDepth) };
 
 	let closeJsonlWriter: (() => Promise<void>) | undefined;
 	const exitCode = await new Promise<number>((resolve) => {
@@ -315,9 +317,17 @@ export async function runSync(
 		durationMs: progress.durationMs,
 	};
 
+	let fullOutput = getFinalOutput(result.messages);
+	if (options.outputPath && result.exitCode === 0) {
+		const resolvedOutput = resolveSingleOutput(options.outputPath, fullOutput, outputSnapshot);
+		fullOutput = resolvedOutput.fullOutput;
+		result.savedOutputPath = resolvedOutput.savedPath;
+		result.outputSaveError = resolvedOutput.saveError;
+	}
+	result.finalOutput = fullOutput;
+
 	if (artifactPathsResult && artifactConfig?.enabled !== false) {
 		result.artifactPaths = artifactPathsResult;
-		const fullOutput = getFinalOutput(result.messages);
 
 		if (artifactConfig?.includeOutput !== false) {
 			writeArtifact(artifactPathsResult.outputPath, fullOutput);
@@ -348,7 +358,6 @@ export async function runSync(
 		}
 	} else if (maxOutput) {
 		const config = { ...DEFAULT_MAX_OUTPUT, ...maxOutput };
-		const fullOutput = getFinalOutput(result.messages);
 		const truncationResult = truncateOutput(fullOutput, config);
 		if (truncationResult.truncated) {
 			result.truncation = truncationResult;

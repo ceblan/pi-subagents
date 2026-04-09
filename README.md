@@ -69,6 +69,7 @@ output: context.md           # writes to {chain_dir}/context.md
 defaultReads: context.md     # comma-separated files to read
 defaultProgress: true        # maintain progress.md
 interactive: true            # (parsed but not enforced in v1)
+maxSubagentDepth: 1          # tighten nested delegation for this agent's children
 ---
 
 Your system prompt goes here (the markdown body after frontmatter).
@@ -303,7 +304,7 @@ Chains can be created from the Agents Manager template picker ("Blank Chain"), o
 - **Parallel-in-Chain**: Fan-out/fan-in patterns with `{ parallel: [...] }` steps within chains
 - **Worktree Isolation**: `worktree: true` gives each parallel agent its own git worktree, preventing filesystem conflicts during concurrent execution
 - **Chain Clarification TUI**: Interactive preview/edit of chain templates and behaviors before execution
-- **Agent Frontmatter Extensions**: Agents declare default chain behavior (`output`, `defaultReads`, `defaultProgress`, `skill`)
+- **Agent Frontmatter Extensions**: Agents declare default chain behavior (`output`, `defaultReads`, `defaultProgress`, `skill`) plus optional recursion limits via `maxSubagentDepth`
 - **Chain Artifacts**: Shared directory at `<tmpdir>/pi-chain-runs/{runId}/` for inter-step files
 - **Solo Agent Output**: Agents with `output` write to temp dir and return path to caller
 - **Live Progress Display**: Real-time visibility during sync execution showing current tool, recent output, tokens, and duration
@@ -589,7 +590,7 @@ Agent definitions are not loaded into LLM context by default. Management actions
 Notes:
 - `create` uses `config.scope` (`"user"` or `"project"`), not `agentScope`.
 - `update`/`delete` use `agentScope` only for scope disambiguation when the same name exists in both scopes.
-- Agent config mapping: `reads -> defaultReads`, `progress -> defaultProgress`, `extensions` controls extension sandboxing, and `tools` supports `mcp:` entries that map to direct MCP tools.
+- Agent config mapping: `reads -> defaultReads`, `progress -> defaultProgress`, `extensions` controls extension sandboxing, `maxSubagentDepth` maps directly to agent frontmatter, and `tools` supports `mcp:` entries that map to direct MCP tools.
 - To clear any optional field, set it to `false` or `""` (e.g., `{ model: false }` or `{ skills: "" }`). Both work for all string-typed fields.
 
 ## Parameters
@@ -695,14 +696,17 @@ After the parallel step completes, per-agent diff stats are appended to the outp
 - Working tree must be clean (no uncommitted changes) — commit or stash first
 - `node_modules/` is symlinked into each worktree to avoid reinstalling
 - Worktree runs use the shared parallel/step `cwd`. Task-level `cwd` overrides must be omitted or match that shared `cwd`; if you need different working directories, disable `worktree` or split the run.
+- If `worktreeSetupHook` is configured, it must return valid JSON and complete before timeout
 
 **What happens under the hood:**
 
 1. `git worktree add` creates a temporary worktree per agent in `<tmpdir>/pi-worktree-*`
-2. Each agent runs in its worktree's cwd (preserving subdirectory context)
-3. After execution, `git add -A && git diff --cached` captures all changes (committed, modified, and new files)
-4. Diff stats appear in the aggregated output; full `.patch` files are written to the artifacts directory
-5. Worktrees and temp branches are cleaned up in a `finally` block
+2. Optional `worktreeSetupHook` runs once per worktree (JSON in on stdin, JSON out on stdout)
+3. Each agent runs in its worktree's cwd (preserving subdirectory context)
+4. Before diff capture, declared synthetic helper paths (for example `.venv` or copied local config files) are removed
+5. After execution, `git add -A && git diff --cached` captures all real changes (committed, modified, and new files)
+6. Diff stats appear in the aggregated output; full `.patch` files are written to the artifacts directory
+7. Worktrees and temp branches are cleaned up in a `finally` block
 
 If you use [pi-prompt-template-model](https://github.com/nicobailon/pi-prompt-template-model), worktree isolation is also available via `worktree: true` in chain template frontmatter or the `--worktree` CLI flag on `chain-prompts`. `pi-prompt-template-model` compare-style prompts can route through the same worktree machinery too; see the `pi-prompt-template-model` README and `examples/` directory for the installable prompt templates.
 
@@ -748,6 +752,54 @@ Session root resolution follows this precedence:
 3. Derived from parent session (stored alongside parent session file)
 
 Sessions are always enabled — every subagent run gets a session directory for tracking.
+
+### `maxSubagentDepth`
+
+`maxSubagentDepth` sets the default recursion limit for nested delegation when no inherited `PI_SUBAGENT_MAX_DEPTH` is already in effect. Eg:
+
+```json
+{
+  "maxSubagentDepth": 1
+}
+```
+
+Per-agent `maxSubagentDepth` can tighten that limit further for child runs, but it does not relax an already inherited stricter limit.
+
+### `worktreeSetupHook`
+
+`worktreeSetupHook` configures an optional setup hook for worktree-isolated parallel runs. The hook runs once per created worktree, after `git worktree add` succeeds and before the agent starts.
+
+```json
+{
+  "worktreeSetupHook": "./scripts/setup-worktree.mjs"
+}
+```
+
+Path rules:
+- Must be an absolute path or a repo-relative path
+- Bare command names from `PATH` are rejected
+- `~/...` is supported for home-directory hooks
+
+Hook I/O contract (JSON only):
+- stdin: one JSON object with `repoRoot`, `worktreePath`, `agentCwd`, `branch`, `index`, `runId`, and `baseCommit`
+- stdout: one JSON object, e.g. `{ "syntheticPaths": [".venv", ".env.local"] }`
+
+`syntheticPaths` must be relative to the worktree root. These paths are removed before diff capture so helper files/symlinks do not pollute generated patches.
+
+Tracked-file edits are never excluded. If the hook tries to mark tracked paths as synthetic, setup fails.
+
+### `worktreeSetupHookTimeoutMs`
+
+Optional timeout (milliseconds) for each worktree hook invocation.
+
+```json
+{
+  "worktreeSetupHook": "./scripts/setup-worktree.mjs",
+  "worktreeSetupHookTimeoutMs": 45000
+}
+```
+
+Default: `30000` ms.
 
 ## Chain Directory
 Each chain run creates `<tmpdir>/pi-chain-runs/{runId}/` containing:
@@ -820,6 +872,14 @@ Press **Ctrl+O** to expand the full streaming view with complete output per step
 Subagents can themselves call the `subagent` tool, which risks unbounded recursive spawning (slow, expensive, hard to observe). A depth guard prevents this.
 
 By default nesting is limited to **2 levels**: `main session → subagent → sub-subagent`. Any deeper `subagent` calls are blocked and return an error with guidance to the calling agent.
+
+You can configure the limit in three places:
+
+1. `PI_SUBAGENT_MAX_DEPTH` in the environment before starting `pi`
+2. `config.maxSubagentDepth` in `~/.pi/agent/extensions/subagent/config.json`
+3. `maxSubagentDepth` in an agent's frontmatter to tighten the limit for that agent's child runs
+
+Environment inherits downward and wins for the current process. Per-agent limits can tighten child delegation but do not relax an already inherited stricter limit.
 
 Override the limit with `PI_SUBAGENT_MAX_DEPTH` **set before starting `pi`**:
 

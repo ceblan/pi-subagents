@@ -3,9 +3,9 @@ import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
-import { appendJsonl, getArtifactPaths } from "./artifacts.js";
-import { getPiSpawnCommand } from "./pi-spawn.js";
-import { persistSingleOutput } from "./single-output.js";
+import { appendJsonl, getArtifactPaths } from "./artifacts.ts";
+import { getPiSpawnCommand } from "./pi-spawn.ts";
+import { captureSingleOutputSnapshot, resolveSingleOutput } from "./single-output.ts";
 import {
 	type ArtifactConfig,
 	type ArtifactPaths,
@@ -13,7 +13,7 @@ import {
 	type MaxOutputConfig,
 	truncateOutput,
 	getSubagentDepthEnv,
-} from "./types.js";
+} from "./types.ts";
 import {
 	type RunnerSubagentStep as SubagentStep,
 	type RunnerStep,
@@ -22,8 +22,8 @@ import {
 	mapConcurrent,
 	aggregateParallelOutputs,
 	MAX_PARALLEL_CONCURRENCY,
-} from "./parallel-utils.js";
-import { buildPiArgs, cleanupTempDir } from "./pi-args.js";
+} from "./parallel-utils.ts";
+import { buildPiArgs, cleanupTempDir } from "./pi-args.ts";
 import {
 	cleanupWorktrees,
 	createWorktrees,
@@ -32,7 +32,7 @@ import {
 	formatWorktreeDiffSummary,
 	formatWorktreeTaskCwdConflict,
 	type WorktreeSetup,
-} from "./worktree.js";
+} from "./worktree.ts";
 
 interface SubagentRunConfig {
 	id: string;
@@ -50,6 +50,8 @@ interface SubagentRunConfig {
 	asyncDir: string;
 	sessionId?: string | null;
 	piPackageRoot?: string;
+	worktreeSetupHook?: string;
+	worktreeSetupHookTimeoutMs?: number;
 }
 
 interface StepResult {
@@ -116,10 +118,11 @@ function runPiStreaming(
 	outputFile: string,
 	env?: Record<string, string | undefined>,
 	piPackageRoot?: string,
+	maxSubagentDepth?: number,
 ): Promise<{ stdout: string; exitCode: number | null }> {
 	return new Promise((resolve) => {
 		const outputStream = fs.createWriteStream(outputFile, { flags: "w" });
-		const spawnEnv = { ...process.env, ...(env ?? {}), ...getSubagentDepthEnv() };
+		const spawnEnv = { ...process.env, ...(env ?? {}), ...getSubagentDepthEnv(maxSubagentDepth) };
 		const spawnSpec = getPiSpawnCommand(args, piPackageRoot ? { piPackageRoot } : undefined);
 		const child = spawn(spawnSpec.command, spawnSpec.args, { cwd, stdio: ["ignore", "pipe", "pipe"], env: spawnEnv });
 		let stdout = "";
@@ -307,6 +310,7 @@ async function runSingleStep(
 	const task = step.task.replace(placeholderRegex, () => ctx.previousOutput);
 	const sessionEnabled = Boolean(step.sessionFile) || ctx.sessionEnabled;
 	const sessionDir = step.sessionFile ? undefined : ctx.sessionDir;
+	const outputSnapshot = captureSingleOutputSnapshot(step.outputPath);
 	const { args, env, tempDir } = buildPiArgs({
 		baseArgs: ["-p"],
 		task,
@@ -332,22 +336,23 @@ async function runSingleStep(
 		}
 	}
 
-	const result = await runPiStreaming(args, step.cwd ?? ctx.cwd, ctx.outputFile, env, ctx.piPackageRoot);
+	const result = await runPiStreaming(args, step.cwd ?? ctx.cwd, ctx.outputFile, env, ctx.piPackageRoot, step.maxSubagentDepth);
 	cleanupTempDir(tempDir);
 
-	const output = (result.stdout || "").trim();
+	const rawOutput = (result.stdout || "").trim();
+	const resolvedOutput = step.outputPath && result.exitCode === 0
+		? resolveSingleOutput(step.outputPath, rawOutput, outputSnapshot)
+		: { fullOutput: rawOutput };
+	const output = resolvedOutput.fullOutput;
 	let outputForSummary = output;
-	if (step.outputPath && result.exitCode === 0) {
-		const persisted = persistSingleOutput(step.outputPath, output);
-		if (persisted.savedPath) {
-			outputForSummary = output
-				? `${output}\n\n📄 Output saved to: ${persisted.savedPath}`
-				: `📄 Output saved to: ${persisted.savedPath}`;
-		} else if (persisted.error) {
-			outputForSummary = output
-				? `${output}\n\n⚠️ Failed to save output to: ${step.outputPath}\n${persisted.error}`
-				: `⚠️ Failed to save output to: ${step.outputPath}\n${persisted.error}`;
-		}
+	if (resolvedOutput.savedPath) {
+		outputForSummary = output
+			? `${output}\n\n📄 Output saved to: ${resolvedOutput.savedPath}`
+			: `📄 Output saved to: ${resolvedOutput.savedPath}`;
+	} else if (resolvedOutput.saveError && step.outputPath && result.exitCode === 0) {
+		outputForSummary = output
+			? `${output}\n\n⚠️ Failed to save output to: ${step.outputPath}\n${resolvedOutput.saveError}`
+			: `⚠️ Failed to save output to: ${step.outputPath}\n${resolvedOutput.saveError}`;
 	}
 
 	if (artifactPaths && ctx.artifactConfig?.enabled !== false) {
@@ -580,7 +585,12 @@ async function runSubagent(config: SubagentRunConfig): Promise<void> {
 					break;
 				}
 				try {
-					worktreeSetup = createWorktrees(cwd, `${id}-s${stepIndex}`, group.parallel.length);
+					worktreeSetup = createWorktrees(cwd, `${id}-s${stepIndex}`, group.parallel.length, {
+						agents: group.parallel.map((task) => task.agent),
+						setupHook: config.worktreeSetupHook
+							? { hookPath: config.worktreeSetupHook, timeoutMs: config.worktreeSetupHookTimeoutMs }
+							: undefined,
+					});
 				} catch (error) {
 					const setupError = error instanceof Error ? error.message : String(error);
 					const failedAt = Date.now();

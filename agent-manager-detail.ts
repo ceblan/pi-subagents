@@ -1,12 +1,12 @@
 import type { Theme } from "@mariozechner/pi-coding-agent";
 import { matchesKey, truncateToWidth } from "@mariozechner/pi-tui";
-import type { AgentConfig } from "./agents.js";
-import { formatDuration } from "./formatters.js";
-import type { RunEntry } from "./run-history.js";
-import { buildSkillInjection, resolveSkills } from "./skills.js";
-import { ensureCursorVisible, getCursorDisplayPos, renderEditor, wrapText } from "./text-editor.js";
-import type { TextEditorState } from "./text-editor.js";
-import { pad, row, renderHeader, renderFooter, formatPath, formatScrollInfo } from "./render-helpers.js";
+import type { AgentConfig } from "./agents.ts";
+import { formatDuration } from "./formatters.ts";
+import type { RunEntry } from "./run-history.ts";
+import { buildSkillInjection, resolveSkills } from "./skills.ts";
+import { ensureCursorVisible, getCursorDisplayPos, renderEditor, wrapText } from "./text-editor.ts";
+import type { TextEditorState } from "./text-editor.ts";
+import { pad, row, renderHeader, renderFooter, formatPath, formatScrollInfo } from "./render-helpers.ts";
 
 export interface DetailState {
 	resolved: boolean;
@@ -58,6 +58,7 @@ function buildDetailLines(
 	const output = agent.output ?? "(none)";
 	const reads = agent.defaultReads && agent.defaultReads.length > 0 ? agent.defaultReads.join(", ") : "(none)";
 	const progress = agent.defaultProgress ? "on" : "off";
+	const maxSubagentDepth = agent.maxSubagentDepth !== undefined ? String(agent.maxSubagentDepth) : "(default)";
 
 	lines.push(renderFieldLine("Model:", agent.model ?? "default", contentWidth, theme));
 	lines.push(renderFieldLine("Thinking:", agent.thinking ?? "off", contentWidth, theme));
@@ -71,6 +72,7 @@ function buildDetailLines(
 	lines.push(renderFieldLine("Output:", output, contentWidth, theme));
 	lines.push(renderFieldLine("Reads:", reads, contentWidth, theme));
 	lines.push(renderFieldLine("Progress:", progress, contentWidth, theme));
+	lines.push(renderFieldLine("Max depth:", maxSubagentDepth, contentWidth, theme));
 
 	if (agent.extraFields) {
 		for (const [key, value] of Object.entries(agent.extraFields)) {

@@ -6,8 +6,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
-import type { AgentConfig } from "./agents.js";
-import { ChainClarifyComponent, type ChainClarifyResult, type BehaviorOverride, type ModelInfo } from "./chain-clarify.js";
+import type { AgentConfig } from "./agents.ts";
+import { ChainClarifyComponent, type ChainClarifyResult, type BehaviorOverride, type ModelInfo } from "./chain-clarify.ts";
 import {
 	resolveChainTemplates,
 	createChainDir,
@@ -24,12 +24,12 @@ import {
 	type ParallelTaskResult,
 	type ResolvedStepBehavior,
 	type ResolvedTemplates,
-} from "./settings.js";
-import { discoverAvailableSkills, normalizeSkillInput } from "./skills.js";
-import { runSync } from "./execution.js";
-import { buildChainSummary } from "./formatters.js";
-import { getFinalOutput, mapConcurrent } from "./utils.js";
-import { recordRun } from "./run-history.js";
+} from "./settings.ts";
+import { discoverAvailableSkills, normalizeSkillInput } from "./skills.ts";
+import { runSync } from "./execution.ts";
+import { buildChainSummary } from "./formatters.ts";
+import { getSingleResultOutput, mapConcurrent } from "./utils.ts";
+import { recordRun } from "./run-history.ts";
 import {
 	cleanupWorktrees,
 	createWorktrees,
@@ -46,7 +46,9 @@ import {
 	type Details,
 	type SingleResult,
 	MAX_CONCURRENCY,
-} from "./types.js";
+	resolveChildMaxSubagentDepth,
+} from "./types.ts";
+
 import { type ExecutionRuntimeOptions } from "./execution-runtime-options.js";
 import { buildChainRunSyncOptions } from "./chain-run-sync-options.js";
 
@@ -105,6 +107,7 @@ interface ParallelChainRunInput {
 	totalSteps: number;
 	worktreeSetup?: WorktreeSetup;
 	runtimeOptions?: ExecutionRuntimeOptions;
+	maxSubagentDepth: number;
 }
 
 function buildChainExecutionDetails(input: ChainExecutionDetailsInput): Details {
@@ -194,10 +197,16 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 			const effectiveModel =
 				(task.model ? resolveModelFullId(task.model, input.availableModels) : null)
 				?? resolveModelFullId(taskAgentConfig?.model, input.availableModels);
+			const maxSubagentDepth = resolveChildMaxSubagentDepth(input.maxSubagentDepth, taskAgentConfig?.maxSubagentDepth);
 
 			const taskCwd = input.worktreeSetup
 				? input.worktreeSetup.worktrees[taskIndex]!.agentCwd
 				: (task.cwd ?? input.cwd);
+
+			const outputPath = typeof behavior.output === "string"
+				? (path.isAbsolute(behavior.output) ? behavior.output : path.join(input.chainDir, behavior.output))
+				: undefined;
+
 
 			const result = await runSync(input.ctx.cwd, input.agents, task.agent, taskStr, buildChainRunSyncOptions({
 				cwd: taskCwd,
@@ -209,6 +218,8 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 				share: input.shareEnabled,
 				artifactsDir: input.artifactConfig.enabled ? input.artifactsDir : undefined,
 				artifactConfig: input.artifactConfig,
+				outputPath,
+				maxSubagentDepth,
 				modelOverride: effectiveModel,
 				skills: behavior.skills === false ? [] : behavior.skills,
 				onUpdate: input.onUpdate
@@ -260,6 +271,9 @@ export interface ChainExecutionParams {
 	chainSkills?: string[];
 	chainDir?: string;
 	runtimeOptions?: ExecutionRuntimeOptions;
+	maxSubagentDepth: number;
+	worktreeSetupHook?: string;
+	worktreeSetupHookTimeoutMs?: number;
 }
 
 export interface ChainExecutionResult {
@@ -463,7 +477,12 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 					);
 				}
 				try {
-					worktreeSetup = createWorktrees(parallelCwd, `${runId}-s${stepIndex}`, step.parallel.length);
+					worktreeSetup = createWorktrees(parallelCwd, `${runId}-s${stepIndex}`, step.parallel.length, {
+						agents: step.parallel.map((task) => task.agent),
+						setupHook: params.worktreeSetupHook
+							? { hookPath: params.worktreeSetupHook, timeoutMs: params.worktreeSetupHookTimeoutMs }
+							: undefined,
+					});
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
 					return buildChainExecutionErrorResult(message, {
@@ -512,6 +531,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 					totalSteps,
 					worktreeSetup,
 					runtimeOptions,
+					maxSubagentDepth: params.maxSubagentDepth,
 				});
 				globalTaskIndex += step.parallel.length;
 
@@ -557,7 +577,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 					return {
 						agent: result.agent,
 						taskIndex: i,
-						output: getFinalOutput(result.messages),
+						output: getSingleResultOutput(result),
 						exitCode: result.exitCode,
 						error: result.error,
 						outputTargetPath,
@@ -635,6 +655,11 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				?? resolveModelFullId(agentConfig.model, availableModels);
 
 			// Run step
+			const outputPath = typeof behavior.output === "string"
+				? (path.isAbsolute(behavior.output) ? behavior.output : path.join(chainDir, behavior.output))
+				: undefined;
+			const maxSubagentDepth = resolveChildMaxSubagentDepth(params.maxSubagentDepth, agentConfig.maxSubagentDepth);
+
 			const r = await runSync(ctx.cwd, agents, seqStep.agent, stepTask, buildChainRunSyncOptions({
 				cwd: seqStep.cwd ?? cwd,
 				signal,
@@ -645,6 +670,8 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				share: shareEnabled,
 				artifactsDir: artifactConfig.enabled ? artifactsDir : undefined,
 				artifactConfig,
+				outputPath,
+				maxSubagentDepth,
 				modelOverride: effectiveModel,
 				skills: behavior.skills === false ? [] : behavior.skills,
 				onUpdate: onUpdate
@@ -715,7 +742,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				};
 			}
 
-			prev = getFinalOutput(r.messages);
+			prev = getSingleResultOutput(r);
 		}
 	}
 

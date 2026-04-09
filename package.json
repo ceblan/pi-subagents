@@ -1,6 +1,6 @@
 {
   "name": "pi-subagents",
-  "version": "0.12.2",
+  "version": "0.12.5",
   "description": "Pi extension for delegating tasks to subagents with chains, parallel execution, and TUI clarification",
   "author": "Nico Bailon",
   "license": "MIT",
@@ -45,6 +45,13 @@
       "./index.ts",
       "./notify.ts"
     ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-agent-core": "*",
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "@sinclair/typebox": "*"
   },
   "devDependencies": {
     "@marcfargas/pi-test-harness": "^0.5.0",

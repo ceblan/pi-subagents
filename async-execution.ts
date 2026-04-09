@@ -9,20 +9,21 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import type { AgentConfig } from "./agents.js";
-import { applyThinkingSuffix } from "./pi-args.js";
-import { injectSingleOutputInstruction, resolveSingleOutputPath } from "./single-output.js";
-import { isParallelStep, resolveStepBehavior, type ChainStep, type SequentialStep, type StepOverrides } from "./settings.js";
-import type { RunnerStep } from "./parallel-utils.js";
-import { resolvePiPackageRoot } from "./pi-spawn.js";
-import { buildSkillInjection, normalizeSkillInput, resolveSkills } from "./skills.js";
+import type { AgentConfig } from "./agents.ts";
+import { applyThinkingSuffix } from "./pi-args.ts";
+import { injectSingleOutputInstruction, resolveSingleOutputPath } from "./single-output.ts";
+import { isParallelStep, resolveStepBehavior, type ChainStep, type SequentialStep, type StepOverrides } from "./settings.ts";
+import type { RunnerStep } from "./parallel-utils.ts";
+import { resolvePiPackageRoot } from "./pi-spawn.ts";
+import { buildSkillInjection, normalizeSkillInput, resolveSkills } from "./skills.ts";
 import {
 	type ArtifactConfig,
 	type Details,
 	type MaxOutputConfig,
 	ASYNC_DIR,
 	RESULTS_DIR,
-} from "./types.js";
+	resolveChildMaxSubagentDepth,
+} from "./types.ts";
 
 const require = createRequire(import.meta.url);
 const piPackageRoot = resolvePiPackageRoot();
@@ -65,6 +66,9 @@ export interface AsyncChainParams {
 	sessionRoot?: string;
 	chainSkills?: string[];
 	sessionFilesByFlatIndex?: (string | undefined)[];
+	maxSubagentDepth: number;
+	worktreeSetupHook?: string;
+	worktreeSetupHookTimeoutMs?: number;
 }
 
 export interface AsyncSingleParams {
@@ -81,6 +85,9 @@ export interface AsyncSingleParams {
 	sessionFile?: string;
 	skills?: string[];
 	output?: string | false;
+	maxSubagentDepth: number;
+	worktreeSetupHook?: string;
+	worktreeSetupHookTimeoutMs?: number;
 }
 
 export interface AsyncExecutionResult {
@@ -106,7 +113,7 @@ function spawnRunner(cfg: object, suffix: string, cwd: string): number | undefin
 	fs.writeFileSync(cfgPath, JSON.stringify(cfg));
 	const runner = path.join(path.dirname(fileURLToPath(import.meta.url)), "subagent-runner.ts");
 	
-	const proc = spawn("node", [jitiCliPath, runner, cfgPath], {
+	const proc = spawn(process.execPath, [jitiCliPath, runner, cfgPath], {
 		cwd,
 		detached: true,
 		stdio: "ignore",
@@ -134,6 +141,9 @@ export function executeAsyncChain(
 		shareEnabled,
 		sessionRoot,
 		sessionFilesByFlatIndex,
+		maxSubagentDepth,
+		worktreeSetupHook,
+		worktreeSetupHookTimeoutMs,
 	} = params;
 	const chainSkills = params.chainSkills ?? [];
 
@@ -197,6 +207,7 @@ export function executeAsyncChain(
 			skills: resolvedSkills.map((r) => r.name),
 			outputPath,
 			sessionFile,
+			maxSubagentDepth: resolveChildMaxSubagentDepth(maxSubagentDepth, a.maxSubagentDepth),
 		};
 	};
 
@@ -244,6 +255,8 @@ export function executeAsyncChain(
 			asyncDir,
 			sessionId: ctx.currentSessionId,
 			piPackageRoot,
+			worktreeSetupHook,
+			worktreeSetupHookTimeoutMs,
 		},
 		id,
 		runnerCwd,
@@ -301,6 +314,9 @@ export function executeAsyncSingle(
 		shareEnabled,
 		sessionRoot,
 		sessionFile,
+		maxSubagentDepth,
+		worktreeSetupHook,
+		worktreeSetupHookTimeoutMs,
 	} = params;
 	const skillNames = params.skills ?? agentConfig.skills ?? [];
 	const { resolved: resolvedSkills } = resolveSkills(skillNames, ctx.cwd);
@@ -341,6 +357,7 @@ export function executeAsyncSingle(
 					skills: resolvedSkills.map((r) => r.name),
 					outputPath,
 					sessionFile,
+					maxSubagentDepth: resolveChildMaxSubagentDepth(maxSubagentDepth, agentConfig.maxSubagentDepth),
 				},
 			],
 			resultPath: path.join(RESULTS_DIR, `${id}.json`),
@@ -354,6 +371,8 @@ export function executeAsyncSingle(
 			asyncDir,
 			sessionId: ctx.currentSessionId,
 			piPackageRoot,
+			worktreeSetupHook,
+			worktreeSetupHookTimeoutMs,
 		},
 		id,
 		runnerCwd,

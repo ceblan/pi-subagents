@@ -6,10 +6,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { KNOWN_FIELDS } from "./agent-serializer.js";
-import { parseChain } from "./chain-serializer.js";
-import { mergeAgentsForScope } from "./agent-selection.js";
-import { parseFrontmatter } from "./frontmatter.js";
+import { KNOWN_FIELDS } from "./agent-serializer.ts";
+import { parseChain } from "./chain-serializer.ts";
+import { mergeAgentsForScope } from "./agent-selection.ts";
+import { parseFrontmatter } from "./frontmatter.ts";
 
 export type AgentScope = "user" | "project" | "both";
 
@@ -32,6 +32,7 @@ export interface AgentConfig {
 	defaultReads?: string[];
 	defaultProgress?: boolean;
 	interactive?: boolean;
+	maxSubagentDepth?: number;
 	extraFields?: Record<string, string>;
 }
 
@@ -134,6 +135,8 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
 			if (!KNOWN_FIELDS.has(key)) extraFields[key] = value;
 		}
 
+		const parsedMaxSubagentDepth = Number(frontmatter.maxSubagentDepth);
+
 		agents.push({
 			name: frontmatter.name,
 			description: frontmatter.description,
@@ -151,6 +154,10 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
 			defaultReads: defaultReads && defaultReads.length > 0 ? defaultReads : undefined,
 			defaultProgress: frontmatter.defaultProgress === "true",
 			interactive: frontmatter.interactive === "true",
+			maxSubagentDepth:
+				Number.isInteger(parsedMaxSubagentDepth) && parsedMaxSubagentDepth >= 0
+					? parsedMaxSubagentDepth
+					: undefined,
 			extraFields: Object.keys(extraFields).length > 0 ? extraFields : undefined,
 		});
 	}
@@ -205,6 +212,9 @@ function isDirectory(p: string): boolean {
 function findNearestProjectAgentsDir(cwd: string): string | null {
 	let currentDir = cwd;
 	while (true) {
+		const candidateAlt = path.join(currentDir, ".agents");
+		if (isDirectory(candidateAlt)) return candidateAlt;
+
 		const candidate = path.join(currentDir, ".pi", "agents");
 		if (isDirectory(candidate)) return candidate;
 
@@ -217,11 +227,16 @@ function findNearestProjectAgentsDir(cwd: string): string | null {
 const BUILTIN_AGENTS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "agents");
 
 export function discoverAgents(cwd: string, scope: AgentScope): AgentDiscoveryResult {
-	const userDir = path.join(os.homedir(), ".pi", "agent", "agents");
+	const userDirOld = path.join(os.homedir(), ".pi", "agent", "agents");
+	const userDirNew = path.join(os.homedir(), ".agents");
 	const projectAgentsDir = findNearestProjectAgentsDir(cwd);
 
 	const builtinAgents = loadAgentsFromDir(BUILTIN_AGENTS_DIR, "builtin");
-	const userAgents = scope === "project" ? [] : loadAgentsFromDir(userDir, "user");
+	
+	const userAgentsOld = scope === "project" ? [] : loadAgentsFromDir(userDirOld, "user");
+	const userAgentsNew = scope === "project" ? [] : loadAgentsFromDir(userDirNew, "user");
+	const userAgents = [...userAgentsOld, ...userAgentsNew];
+
 	const projectAgents = scope === "user" || !projectAgentsDir ? [] : loadAgentsFromDir(projectAgentsDir, "project");
 	const agents = mergeAgentsForScope(scope, userAgents, projectAgents, builtinAgents);
 
@@ -236,16 +251,23 @@ export function discoverAgentsAll(cwd: string): {
 	userDir: string;
 	projectDir: string | null;
 } {
-	const userDir = path.join(os.homedir(), ".pi", "agent", "agents");
+	const userDirOld = path.join(os.homedir(), ".pi", "agent", "agents");
+	const userDirNew = path.join(os.homedir(), ".agents");
 	const projectDir = findNearestProjectAgentsDir(cwd);
 
 	const builtin = loadAgentsFromDir(BUILTIN_AGENTS_DIR, "builtin");
-	const user = loadAgentsFromDir(userDir, "user");
+	const user = [
+		...loadAgentsFromDir(userDirOld, "user"),
+		...loadAgentsFromDir(userDirNew, "user"),
+	];
 	const project = projectDir ? loadAgentsFromDir(projectDir, "project") : [];
 	const chains = [
-		...loadChainsFromDir(userDir, "user"),
+		...loadChainsFromDir(userDirOld, "user"),
+		...loadChainsFromDir(userDirNew, "user"),
 		...(projectDir ? loadChainsFromDir(projectDir, "project") : []),
 	];
+
+	const userDir = fs.existsSync(userDirNew) ? userDirNew : userDirOld;
 
 	return { builtin, user, project, chains, userDir, projectDir };
 }

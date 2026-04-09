@@ -33,7 +33,37 @@ function makeDeps(input: {
 }
 
 describe("getPiSpawnCommand", () => {
-	it("uses plain pi command on non-Windows", () => {
+	it("uses node + argv1 script on non-Windows when argv1 is runnable JS", () => {
+		const argv1 = "/tmp/pi-entry.mjs";
+		const deps = makeDeps({
+			platform: "darwin",
+			execPath: "/usr/local/bin/node",
+			argv1,
+			existing: [argv1],
+		});
+		const args = ["--mode", "json", "Task: check output"];
+		const result = getPiSpawnCommand(args, deps);
+		assert.equal(result.command, "/usr/local/bin/node");
+		assert.deepEqual(result.args, [argv1, ...args]);
+	});
+
+	it("resolves CLI script from package bin on non-Windows when argv1 is not runnable", () => {
+		const packageJsonPath = "/opt/pi/package.json";
+		const cliPath = path.resolve(path.dirname(packageJsonPath), "dist/cli/index.js");
+		const deps = makeDeps({
+			platform: "darwin",
+			execPath: "/usr/local/bin/node",
+			argv1: "/opt/pi/subagent-runner.ts",
+			packageJsonPath,
+			packageJsonContent: JSON.stringify({ bin: { pi: "dist/cli/index.js" } }),
+			existing: [packageJsonPath, cliPath],
+		});
+		const result = getPiSpawnCommand(["-p", "Task: hello"], deps);
+		assert.equal(result.command, "/usr/local/bin/node");
+		assert.equal(result.args[0], cliPath);
+	});
+
+	it("falls back to plain pi command on non-Windows when CLI script cannot be resolved", () => {
 		const args = ["--mode", "json", "Task: check output"];
 		const result = getPiSpawnCommand(args, { platform: "darwin" });
 		assert.deepEqual(result, { command: "pi", args });
