@@ -73,7 +73,21 @@ async function main() {
 		await new Promise((resolve) => setTimeout(resolve, response.delay));
 	}
 
-	if (Array.isArray(response.jsonl) && response.jsonl.length > 0) {
+	if (Array.isArray(response.steps) && response.steps.length > 0) {
+		for (const step of response.steps) {
+			if (typeof step?.delay === "number" && step.delay > 0) {
+				await new Promise((resolve) => setTimeout(resolve, step.delay));
+			}
+			if (Array.isArray(step?.jsonl) && step.jsonl.length > 0) {
+				for (const entry of step.jsonl) {
+					writeJsonlLine(entry);
+				}
+			}
+			if (typeof step?.stderr === "string" && step.stderr.length > 0) {
+				process.stderr.write(step.stderr);
+			}
+		}
+	} else if (Array.isArray(response.jsonl) && response.jsonl.length > 0) {
 		for (const entry of response.jsonl) {
 			writeJsonlLine(entry);
 		}

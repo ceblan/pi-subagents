@@ -83,6 +83,40 @@ describe("chain execution — sequential", { skip: !available ? "pi packages not
 		assert.equal(result.details.results[1].agent, "reporter");
 	});
 
+	it("retries chain steps with fallback models on retryable provider failures", async () => {
+		mockPi.onCall({
+			jsonl: [{
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "primary failed" }],
+					model: "openai/gpt-5-mini",
+					errorMessage: "provider unavailable",
+					usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } },
+				},
+			}],
+			exitCode: 1,
+		});
+		mockPi.onCall({ output: "Step 1 recovered" });
+		mockPi.onCall({ output: "Step 2 ran" });
+		const agents = [
+			makeAgent("step1", { model: "openai/gpt-5-mini", fallbackModels: ["anthropic/claude-sonnet-4"] }),
+			makeAgent("step2"),
+		];
+
+		const result = await executeChain(
+			makeChainParams(
+				[{ agent: "step1", task: "Do step 1" }, { agent: "step2" }],
+				agents,
+			),
+		);
+
+		assert.ok(!result.isError, `chain should succeed: ${JSON.stringify(result.content)}`);
+		assert.equal(result.details.results.length, 2);
+		assert.deepEqual(result.details.results[0].attemptedModels, ["openai/gpt-5-mini", "anthropic/claude-sonnet-4"]);
+		assert.equal(mockPi.callCount(), 3);
+	});
+
 	it("passes {previous} between steps (step 2 receives step 1 output)", async () => {
 		// Mock echoes the task by default, so step 2's output will contain step 1's output
 		// if {previous} was properly substituted

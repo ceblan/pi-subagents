@@ -16,6 +16,7 @@ import { isParallelStep, resolveStepBehavior, type ChainStep, type SequentialSte
 import type { RunnerStep } from "./parallel-utils.ts";
 import { resolvePiPackageRoot } from "./pi-spawn.ts";
 import { buildSkillInjection, normalizeSkillInput, resolveSkills } from "./skills.ts";
+import { buildModelCandidates, resolveModelCandidate, type AvailableModelInfo } from "./model-fallback.ts";
 import {
 	type ArtifactConfig,
 	type Details,
@@ -58,6 +59,7 @@ export interface AsyncChainParams {
 	chain: ChainStep[];
 	agents: AgentConfig[];
 	ctx: AsyncExecutionContext;
+	availableModels?: AvailableModelInfo[];
 	cwd?: string;
 	maxOutput?: MaxOutputConfig;
 	artifactsDir?: string;
@@ -85,6 +87,8 @@ export interface AsyncSingleParams {
 	sessionFile?: string;
 	skills?: string[];
 	output?: string | false;
+	modelOverride?: string;
+	availableModels?: AvailableModelInfo[];
 	maxSubagentDepth: number;
 	worktreeSetupHook?: string;
 	worktreeSetupHookTimeoutMs?: number;
@@ -146,6 +150,7 @@ export function executeAsyncChain(
 		worktreeSetupHookTimeoutMs,
 	} = params;
 	const chainSkills = params.chainSkills ?? [];
+	const availableModels = params.availableModels;
 
 	// Validate all agents exist before building steps
 	for (const s of chain) {
@@ -195,11 +200,15 @@ export function executeAsyncChain(
 		const outputPath = resolveSingleOutputPath(s.output, ctx.cwd, s.cwd ?? cwd);
 		const task = injectSingleOutputInstruction(s.task ?? "{previous}", outputPath);
 
+		const primaryModel = resolveModelCandidate(s.model ?? a.model, availableModels);
 		return {
 			agent: s.agent,
 			task,
 			cwd: s.cwd,
-			model: applyThinkingSuffix(s.model ?? a.model, a.thinking),
+			model: applyThinkingSuffix(primaryModel, a.thinking),
+			modelCandidates: buildModelCandidates(s.model ?? a.model, a.fallbackModels, availableModels).map((candidate) =>
+				applyThinkingSuffix(candidate, a.thinking),
+			),
 			tools: a.tools,
 			extensions: a.extensions,
 			mcpDirectTools: a.mcpDirectTools,
@@ -319,6 +328,7 @@ export function executeAsyncSingle(
 		worktreeSetupHookTimeoutMs,
 	} = params;
 	const skillNames = params.skills ?? agentConfig.skills ?? [];
+	const availableModels = params.availableModels;
 	const { resolved: resolvedSkills } = resolveSkills(skillNames, ctx.cwd);
 	let systemPrompt = agentConfig.systemPrompt?.trim() || null;
 	if (resolvedSkills.length > 0) {
@@ -349,7 +359,10 @@ export function executeAsyncSingle(
 					agent,
 					task: taskWithOutputInstruction,
 					cwd,
-					model: applyThinkingSuffix(agentConfig.model, agentConfig.thinking),
+					model: applyThinkingSuffix(resolveModelCandidate(params.modelOverride ?? agentConfig.model, availableModels), agentConfig.thinking),
+					modelCandidates: buildModelCandidates(params.modelOverride ?? agentConfig.model, agentConfig.fallbackModels, availableModels).map((candidate) =>
+						applyThinkingSuffix(candidate, agentConfig.thinking),
+					),
 					tools: agentConfig.tools,
 					extensions: agentConfig.extensions,
 					mcpDirectTools: agentConfig.mcpDirectTools,

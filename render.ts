@@ -195,9 +195,11 @@ export function renderSubagentResult(
 		const isRunning = r.progress?.status === "running";
 		const icon = isRunning
 			? theme.fg("warning", "...")
-			: r.exitCode === 0
-				? theme.fg("success", "ok")
-				: theme.fg("error", "X");
+			: r.detached
+				? theme.fg("warning", "↗")
+				: r.exitCode === 0
+					? theme.fg("success", "ok")
+					: theme.fg("error", "X");
 		const contextBadge = d.context === "fork" ? theme.fg("warning", " [fork]") : "";
 		const output = r.truncation?.text || getSingleResultOutput(r);
 
@@ -264,6 +266,9 @@ export function renderSubagentResult(
 		}
 		if (r.skillsWarning) {
 			c.addChild(new Text(truncLine(theme.fg("warning", `⚠️ ${r.skillsWarning}`), w), 0, 0));
+		}
+		if (r.attemptedModels && r.attemptedModels.length > 1) {
+			c.addChild(new Text(truncLine(theme.fg("dim", `Fallbacks: ${r.attemptedModels.join(" → ")}`), w), 0, 0));
 		}
 		c.addChild(new Text(truncLine(theme.fg("dim", formatUsage(r.usage, r.model)), w), 0, 0));
 		if (r.sessionFile) {
@@ -426,6 +431,9 @@ export function renderSubagentResult(
 		}
 		if (r.skillsWarning) {
 			c.addChild(new Text(truncLine(theme.fg("warning", `    ⚠️ ${r.skillsWarning}`), w), 0, 0));
+		}
+		if (r.attemptedModels && r.attemptedModels.length > 1) {
+			c.addChild(new Text(truncLine(theme.fg("dim", `    fallbacks: ${r.attemptedModels.join(" → ")}`), w), 0, 0));
 		}
 
 		if (rRunning && rProg) {

@@ -11,6 +11,9 @@ export interface AsyncRunStepSummary {
 	durationMs?: number;
 	tokens?: TokenUsage;
 	skills?: string[];
+	model?: string;
+	attemptedModels?: string[];
+	error?: string;
 }
 
 export interface AsyncRunSummary {
@@ -81,6 +84,9 @@ function statusToSummary(asyncDir: string, status: AsyncStatus & { cwd?: string 
 			...(step.durationMs !== undefined ? { durationMs: step.durationMs } : {}),
 			...(step.tokens ? { tokens: step.tokens } : {}),
 			...(step.skills ? { skills: step.skills } : {}),
+			...(step.model ? { model: step.model } : {}),
+			...(step.attemptedModels ? { attemptedModels: step.attemptedModels } : {}),
+			...(step.error ? { error: step.error } : {}),
 		})),
 		...(status.sessionDir ? { sessionDir: status.sessionDir } : {}),
 		...(status.outputFile ? { outputFile: status.outputFile } : {}),
@@ -147,6 +153,7 @@ export function listAsyncRunsForOverlay(asyncDirRoot: string, recentLimit = 5): 
 
 function formatStepLine(step: AsyncRunStepSummary): string {
 	const parts = [`${step.index + 1}. ${step.agent}`, step.status];
+	if (step.model) parts.push(step.model);
 	if (step.durationMs !== undefined) parts.push(formatDuration(step.durationMs));
 	if (step.tokens) parts.push(`${formatTokens(step.tokens.total)} tok`);
 	return parts.join(" | ");

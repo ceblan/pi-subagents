@@ -21,6 +21,7 @@ export interface AgentConfig {
 	tools?: string[];
 	mcpDirectTools?: string[];
 	model?: string;
+	fallbackModels?: string[];
 	thinking?: string;
 	systemPrompt: string;
 	source: AgentSource;
@@ -121,6 +122,10 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
 			?.split(",")
 			.map((s) => s.trim())
 			.filter(Boolean);
+		const fallbackModels = frontmatter.fallbackModels
+			?.split(",")
+			.map((model) => model.trim())
+			.filter(Boolean);
 
 		let extensions: string[] | undefined;
 		if (frontmatter.extensions !== undefined) {
@@ -143,6 +148,7 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
 			tools: tools.length > 0 ? tools : undefined,
 			mcpDirectTools: mcpDirectTools.length > 0 ? mcpDirectTools : undefined,
 			model: frontmatter.model,
+			fallbackModels: fallbackModels && fallbackModels.length > 0 ? fallbackModels : undefined,
 			thinking: frontmatter.thinking,
 			systemPrompt: body,
 			source,

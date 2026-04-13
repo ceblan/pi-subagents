@@ -14,12 +14,6 @@ https://github.com/user-attachments/assets/702554ec-faaf-4635-80aa-fb5d6e292fd1
 pi install npm:pi-subagents
 ```
 
-To remove:
-
-```bash
-npx pi-subagents --remove
-```
-
 If you use [pi-prompt-template-model](https://github.com/nicobailon/pi-prompt-template-model), you can wrap subagent delegation in a slash command:
 
 ```markdown
@@ -63,6 +57,7 @@ description: Fast codebase recon
 tools: read, grep, find, ls, bash, mcp:chrome-devtools  # mcp: requires pi-mcp-adapter
 extensions:                 # absent=all, empty=none, csv=allowlist
 model: claude-haiku-4-5
+fallbackModels: openai/gpt-5-mini, anthropic/claude-sonnet-4  # optional ordered fallbacks
 thinking: high               # off, minimal, low, medium, high, xhigh
 skill: safe-bash, chrome-devtools  # comma-separated skills to inject
 output: context.md           # writes to {chain_dir}/context.md
@@ -76,6 +71,12 @@ Your system prompt goes here (the markdown body after frontmatter).
 ```
 
 The `thinking` field sets a default extended thinking level for the agent. At runtime it's appended as a `:level` suffix to the model string (e.g., `claude-sonnet-4-5:high`). If the model already has a thinking suffix (from a chain-clarify override), the agent's default is not double-applied.
+
+`fallbackModels` is an optional ordered list of backup models to try when the primary model fails with a provider/model-style error such as quota, auth, timeout, or provider/model unavailable. In markdown frontmatter, declare it as a comma-separated string. In management `config` objects, you can pass either a comma-separated string or a string array.
+
+Fallback resolution follows the same conservative model lookup as normal execution. Explicit `provider/model` values are used as-is. Bare model IDs are only upgraded to a full `provider/model` when they map cleanly to a single registry entry. If a bare ID is ambiguous, it stays bare.
+
+Fallback is only used for provider/model availability failures. Ordinary task failures such as bad `bash` commands, missing files, or other tool/runtime errors do not trigger a model hop.
 
 **Extension sandboxing**
 
@@ -324,6 +325,9 @@ Chains can be created from the Agents Manager template picker ("Blank Chain"), o
 | Parallel | Yes | `{ tasks: [{agent, task}...] }` - via TUI toggle or converted to chain for async |
 
 Execution context defaults to `context: "fresh"`, which starts each child run from a clean session. Set `context: "fork"` to start each child from a real branched session created from the parent's current leaf.
+When `intercomBridge` is enabled (default: `always`) and `pi-intercom` is installed/enabled, delegated children get runtime instructions for contacting the orchestrator session via `intercom({ action: "ask"|"send", ... })`.
+
+> **Note:** Intercom bridging requires the [pi-intercom](https://github.com/nicobailon/pi-intercom) extension. Install it with `pi install npm:pi-intercom`.
 
 All modes support foreground and background execution. Foreground is the default (the call waits and streams progress). For programmatic background launch, use `clarify: false, async: true`. For interactive background launch, use `clarify: true` and press `b` in the TUI before running. Chains with parallel steps (`{ parallel: [...] }`) run concurrently with configurable `concurrency` and `failFast` options.
 
@@ -552,6 +556,7 @@ Agent definitions are not loaded into LLM context by default. Management actions
   scope: "user",
   systemPrompt: "You are a code scout...",
   model: "anthropic/claude-sonnet-4",
+  fallbackModels: ["openai/gpt-5-mini", "anthropic/claude-haiku-4-5"],
   tools: "read, bash, mcp:github/search_repositories",
   extensions: "", // empty = no extensions
   skills: "parallel-scout",
@@ -590,7 +595,7 @@ Agent definitions are not loaded into LLM context by default. Management actions
 Notes:
 - `create` uses `config.scope` (`"user"` or `"project"`), not `agentScope`.
 - `update`/`delete` use `agentScope` only for scope disambiguation when the same name exists in both scopes.
-- Agent config mapping: `reads -> defaultReads`, `progress -> defaultProgress`, `extensions` controls extension sandboxing, `maxSubagentDepth` maps directly to agent frontmatter, and `tools` supports `mcp:` entries that map to direct MCP tools.
+- Agent config mapping: `reads -> defaultReads`, `progress -> defaultProgress`, `extensions` controls extension sandboxing, `maxSubagentDepth` maps directly to agent frontmatter, `fallbackModels` maps directly to agent frontmatter, and `tools` supports `mcp:` entries that map to direct MCP tools.
 - To clear any optional field, set it to `false` or `""` (e.g., `{ model: false }` or `{ skills: "" }`). Both work for all string-typed fields.
 
 ## Parameters
@@ -601,10 +606,11 @@ Notes:
 | `task` | string | - | Task string (single mode) |
 | `action` | string | - | Management action: `list`, `get`, `create`, `update`, `delete` |
 | `chainName` | string | - | Chain name for management get/update/delete |
-| `config` | object | - | Agent or chain config for management create/update |
+| `config` | object | - | Agent or chain config for management create/update. Agent configs also accept `fallbackModels` (comma-separated string or string array). |
 | `output` | `string \| false` | agent default | Override output file for single agent (absolute path as-is, relative path resolved against cwd) |
 | `skill` | `string \| string[] \| false` | agent default | Override skills (comma-separated string, array, or false to disable) |
 | `model` | string | agent default | Override model for single agent |
+| `fallbackModels` | `string \| string[]` | agent default | Management/config-only field for ordered backup models. Markdown frontmatter uses a comma-separated string. |
 | `tasks` | `{agent, task, cwd?, count?, skill?}[]` | - | Parallel tasks. Foreground runs directly; background requests are converted to an equivalent chain. `count` repeats one task entry N times with the same settings. |
 | `worktree` | boolean | false | Create isolated git worktrees for each parallel task. Requires clean git state. Per-worktree diffs included in output. |
 | `chain` | ChainItem[] | - | Sequential steps with behavior overrides (see below) |
@@ -637,6 +643,8 @@ Notes:
 | `skill` | `string \| string[] \| false` | agent default | Override skills or disable all |
 | `model` | string | agent default | Override model for this step |
 
+Fallbacks are inherited from the selected agent for that step. There is no per-step `fallbackModels` override in v1.
+
 *Parallel step fields:*
 
 | Field | Type | Default | Description |
@@ -659,6 +667,8 @@ Notes:
 | `progress` | boolean | agent default | Override progress tracking |
 | `skill` | `string \| string[] \| false` | agent default | Override skills or disable all |
 | `model` | string | agent default | Override model for this task |
+
+Fallbacks are inherited from the selected agent for that task. There is no per-task `fallbackModels` override in v1.
 
 Status tool:
 
@@ -765,6 +775,42 @@ Sessions are always enabled — every subagent run gets a session directory for 
 
 Per-agent `maxSubagentDepth` can tighten that limit further for child runs, but it does not relax an already inherited stricter limit.
 
+### `intercomBridge`
+
+Controls whether subagents receive runtime intercom coordination instructions (and `intercom` is auto-added to their tool allowlist when needed).
+
+```json
+{
+	"intercomBridge": {
+		"mode": "always",
+		"instructionFile": "./intercom-bridge.md"
+	}
+}
+```
+
+Fields:
+- `"mode"` (default: `"always"`): inject bridge in both `fresh` and `fork`, only in `fork`, or disable it entirely
+- `"instructionFile"` (optional): path to a Markdown template that replaces the default injected subagent intercom instructions. Supports `{orchestratorTarget}` placeholder interpolation. Relative paths resolve from `~/.pi/agent/extensions/subagent/`.
+
+Example `instructionFile`:
+
+```md
+Intercom orchestration channel:
+
+Use `intercom` only to coordinate with the orchestrator session `{orchestratorTarget}`.
+
+- Need a decision or you're blocked: `intercom({ action: "ask", to: "{orchestratorTarget}", message: "<question>" })`
+- Need to report progress or completion: `intercom({ action: "send", to: "{orchestratorTarget}", message: "DONE: <summary>" })`
+
+If intercom is unavailable in this run, continue the task normally.
+```
+
+Bridge activation also requires all of the following:
+- [pi-intercom](https://github.com/nicobailon/pi-intercom) is installed (`pi install npm:pi-intercom`)
+- `~/.pi/agent/intercom/config.json` is not set to `"enabled": false`
+- the current session has a target name (existing `/name`, or auto-assigned `session-<id>` when unnamed)
+- if agent `extensions` is an explicit allowlist, it must include `pi-intercom`
+
 ### `worktreeSetupHook`
 
 `worktreeSetupHook` configures an optional setup hook for worktree-isolated parallel runs. The hook runs once per created worktree, after `git worktree add` succeeds and before the agent starts.
@@ -821,7 +867,9 @@ Files per task:
 - `{runId}_{agent}_input.md` - Task prompt
 - `{runId}_{agent}_output.md` - Full output (untruncated)
 - `{runId}_{agent}.jsonl` - Event stream (sync only)
-- `{runId}_{agent}_meta.json` - Timing, usage, exit code
+- `{runId}_{agent}_meta.json` - Timing, usage, exit code, final model, attempted models, and per-attempt outcomes
+
+When fallback is used, metadata records both the ordered `attemptedModels` list and `modelAttempts` entries with success/failure, exit code, error, and usage per attempt.
 
 ## Session Logs
 
@@ -904,6 +952,8 @@ Async runs write a dedicated observability folder:
 
 `status.json` is the source of truth for async progress and powers both the TUI widget and `/subagents-status`. Async status and result files are written atomically, so readers do not observe partial JSON during background updates.
 
+When fallback is used in async/background mode, `status.json` and the final result JSON include the final selected model, ordered attempted models, and per-attempt outcomes so background runs are as debuggable as sync runs.
+
 For programmatic access:
 
 ```typescript
@@ -934,7 +984,7 @@ Async events:
 ├── chain-serializer.ts           # Parse/serialize .chain.md files
 ├── async-execution.ts            # Async/background execution support
 ├── async-status.ts               # Async run discovery, listing, and formatting
-├── execution.ts                  # Core runSync, applyThinkingSuffix
+├── execution.ts                  # Core runSync and sync fallback handling
 ├── render.ts                     # TUI rendering (widget, tool result display)
 ├── subagents-status.ts           # Async status overlay component
 ├── artifacts.ts                  # Artifact management
@@ -942,6 +992,7 @@ Async events:
 ├── schemas.ts                    # TypeBox parameter schemas
 ├── utils.ts                      # Shared utility functions (mapConcurrent, readStatus, etc.)
 ├── types.ts                      # Shared types and constants
+├── model-fallback.ts             # Fallback candidate resolution and retry classification
 ├── subagent-runner.ts            # Async runner (detached process)
 ├── parallel-utils.ts             # Parallel execution utilities for async runner
 ├── worktree.ts                   # Git worktree isolation for parallel execution

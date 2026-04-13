@@ -10,6 +10,7 @@ export interface RunnerSubagentStep {
 	task: string;
 	cwd?: string;
 	model?: string;
+	modelCandidates?: string[];
 	tools?: string[];
 	extensions?: string[];
 	mcpDirectTools?: string[];
@@ -83,6 +84,8 @@ export interface ParallelTaskResult {
 	output: string;
 	exitCode: number | null;
 	error?: string;
+	model?: string;
+	attemptedModels?: string[];
 	outputTargetPath?: string;
 	outputTargetExists?: boolean;
 }

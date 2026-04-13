@@ -16,7 +16,7 @@ export interface EditState {
 export interface EditInputResult { action?: "save" | "discard"; nextScreen?: EditScreen; }
 
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
-const FIELD_ORDER = ["name", "description", "model", "thinking", "tools", "extensions", "skills", "output", "reads", "progress", "interactive", "prompt"] as const;
+const FIELD_ORDER = ["name", "description", "model", "fallbackModels", "thinking", "tools", "extensions", "skills", "output", "reads", "progress", "interactive", "prompt"] as const;
 type EditField = typeof FIELD_ORDER[number];
 type ThinkingLevel = typeof THINKING_LEVELS[number];
 const PROMPT_VIEWPORT_HEIGHT = 16;
@@ -29,7 +29,7 @@ function parseCommaList(value: string): string[] | undefined { const items = val
 
 export function createEditState(draft: AgentConfig, isNew: boolean, models: ModelInfo[], skills: SkillInfo[]): EditState {
 	return {
-		draft: { ...draft, tools: draft.tools ? [...draft.tools] : undefined, mcpDirectTools: draft.mcpDirectTools ? [...draft.mcpDirectTools] : undefined, skills: draft.skills ? [...draft.skills] : undefined, extensions: draft.extensions ? [...draft.extensions] : draft.extensions, defaultReads: draft.defaultReads ? [...draft.defaultReads] : undefined, extraFields: draft.extraFields ? { ...draft.extraFields } : undefined },
+		draft: { ...draft, tools: draft.tools ? [...draft.tools] : undefined, mcpDirectTools: draft.mcpDirectTools ? [...draft.mcpDirectTools] : undefined, skills: draft.skills ? [...draft.skills] : undefined, fallbackModels: draft.fallbackModels ? [...draft.fallbackModels] : undefined, extensions: draft.extensions ? [...draft.extensions] : draft.extensions, defaultReads: draft.defaultReads ? [...draft.defaultReads] : undefined, extraFields: draft.extraFields ? { ...draft.extraFields } : undefined },
 		isNew, fieldIndex: 0, fieldMode: null, fieldEditor: createEditorState(), promptEditor: createEditorState(draft.systemPrompt ?? ""),
 		modelSearchQuery: "", modelCursor: 0, filteredModels: [...models], thinkingCursor: 0, skillSearchQuery: "", skillCursor: 0, filteredSkills: [...skills], skillSelected: new Set(draft.skills ?? []),
 	};
@@ -41,6 +41,7 @@ function renderFieldValue(field: EditField, state: EditState): string {
 		case "name": return draft.name;
 		case "description": return draft.description;
 		case "model": return draft.model ?? "default";
+		case "fallbackModels": return draft.fallbackModels && draft.fallbackModels.length > 0 ? draft.fallbackModels.join(", ") : "";
 		case "thinking": return draft.thinking ?? "off";
 		case "tools": return formatTools(draft);
 		case "extensions": return draft.extensions !== undefined ? (draft.extensions.length > 0 ? draft.extensions.join(", ") : "") : "(all)";
@@ -59,6 +60,7 @@ function applyFieldValue(field: EditField, state: EditState, value: string): voi
 		case "name": draft.name = value.trim(); break;
 		case "description": draft.description = value.trim(); break;
 		case "model": draft.model = value.trim() || undefined; break;
+		case "fallbackModels": draft.fallbackModels = parseCommaList(value); break;
 		case "tools": { const parsed = parseTools(value); draft.tools = parsed.tools; draft.mcpDirectTools = parsed.mcp; break; }
 		case "extensions": { const trimmed = value.trim(); draft.extensions = trimmed === "(all)" ? undefined : parseCommaList(trimmed) ?? []; break; }
 		case "skills": draft.skills = parseCommaList(value); break;

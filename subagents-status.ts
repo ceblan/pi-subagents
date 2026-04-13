@@ -158,10 +158,17 @@ export class SubagentsStatusComponent implements Component {
 			row(`cwd: ${truncateToWidth(shortenPath(run.cwd ?? run.asyncDir), innerW - 5)}`, width, this.theme),
 		];
 		for (const step of run.steps) {
+			const model = step.model ? ` | ${step.model}` : "";
+			const attempts = step.attemptedModels && step.attemptedModels.length > 1
+				? ` | attempts ${step.attemptedModels.length}`
+				: "";
 			const duration = step.durationMs !== undefined ? ` | ${formatDuration(step.durationMs)}` : "";
 			const tokens = step.tokens ? ` | ${formatTokens(step.tokens.total)} tok` : "";
-			const line = `  ${step.index + 1}. ${step.agent} | ${stepStatusColor(this.theme, step.status)}${duration}${tokens}`;
+			const line = `  ${step.index + 1}. ${step.agent} | ${stepStatusColor(this.theme, step.status)}${model}${attempts}${duration}${tokens}`;
 			lines.push(row(truncateToWidth(line, innerW), width, this.theme));
+			if (step.error) {
+				lines.push(row(truncateToWidth(`     ${step.error}`, innerW), width, this.theme));
+			}
 		}
 		if (run.steps.length === 0) {
 			lines.push(row(this.theme.fg("dim", "  No step details available yet."), width, this.theme));

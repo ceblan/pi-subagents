@@ -51,6 +51,8 @@ Execution support:
 - [[subagent-config.ts]] — `loadSubagentConfig`, `resolveTmuxConfig`: config loading and tmux resolution
 - [[slash-prompt.ts]] — `emitOriginalSlashPrompt`: record slash command prompts in session history
 - [[single-output.ts]] — output file handling for solo agent runs
+- [[model-fallback.ts]] — model candidate resolution, retryable failure detection, and fallback attempt notes
+- [[intercom-bridge.ts]] — conditional intercom tool/prompt injection for orchestrator↔subagent coordination
 
 Observability:
 
@@ -100,5 +102,7 @@ In async mode, execution is handed off to `subagent-runner.ts` as a detached pro
 ## Dependency Graph
 
 `subagent-executor.ts` depends on nearly all other modules. `types.ts` and `utils.ts` are leaves with no internal imports.
+
+Intercom bridging is resolved in `createSubagentExecutor` before execution begins: discovered agents are optionally transformed through [[intercom-bridge.ts#applyIntercomBridgeToAgent]] when config/context permits.
 
 `settings.ts` owns chain-step behavior resolution and is imported by both `chain-execution.ts` and `async-execution.ts`. `agents.ts` is imported by all execution paths and the management layer.

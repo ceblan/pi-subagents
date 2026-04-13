@@ -47,4 +47,6 @@ Completion deduplication (so a single run fires one notification) is handled by 
 
 ## Run History
 
-Synchronous run outcomes are recorded to a per-agent JSONL file by `recordRun` in [[run-history.ts]]. Each entry captures `task`, `exitCode`, `durationMs`, `tokens`, `model`, and `skills`. The Agents Manager Detail screen reads this history to show recent runs.
+Synchronous run outcomes are recorded to `~/.pi/agent/run-history.jsonl` by `recordRun` in [[run-history.ts]]. Each entry captures `agent`, truncated `task`, timestamp, `status`, `duration`, and non-zero `exit` code when present.
+
+`loadRunsForAgent` filters by agent and performs lightweight log rotation when the file grows past the read threshold, and the Agents Manager Detail screen uses this history for recent-run summaries.

@@ -63,6 +63,7 @@ interface AgentConfig {
 	description?: string;
 	systemPrompt?: string;
 	model?: string;
+	fallbackModels?: string[];
 	tools?: string[];
 	extensions?: string[];
 	skills?: string[];
@@ -111,6 +112,7 @@ export function makeMinimalCtx(cwd: string): any {
 		hasUI: false,
 		ui: {},
 		sessionManager: {
+			getSessionId: () => "session-123",
 			getSessionFile: () => null,
 		},
 		modelRegistry: {

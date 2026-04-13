@@ -58,7 +58,7 @@ export interface ResolvedSkill {
 export interface AgentProgress {
 	index: number;
 	agent: string;
-	status: "pending" | "running" | "completed" | "failed";
+	status: "pending" | "running" | "completed" | "failed" | "detached";
 	task: string;
 	skills?: string[];
 	currentTool?: string;
@@ -82,13 +82,25 @@ export interface ProgressSummary {
 // Results
 // ============================================================================
 
+export interface ModelAttempt {
+	model: string;
+	success: boolean;
+	exitCode?: number | null;
+	error?: string;
+	usage?: Usage;
+}
+
 export interface SingleResult {
 	agent: string;
 	task: string;
 	exitCode: number;
+	detached?: boolean;
+	detachedReason?: string;
 	messages: Message[];
 	usage: Usage;
 	model?: string;
+	attemptedModels?: string[];
+	modelAttempts?: ModelAttempt[];
 	error?: string;
 	sessionFile?: string;
 	skills?: string[];
@@ -159,7 +171,17 @@ export interface AsyncStatus {
 	lastUpdate?: number;
 	cwd?: string;
 	currentStep?: number;
-	steps?: Array<{ agent: string; status: string; durationMs?: number; tokens?: TokenUsage; skills?: string[] }>;
+	steps?: Array<{
+		agent: string;
+		status: string;
+		durationMs?: number;
+		tokens?: TokenUsage;
+		skills?: string[];
+		model?: string;
+		attemptedModels?: string[];
+		modelAttempts?: ModelAttempt[];
+		error?: string;
+	}>;
 	sessionDir?: string;
 	outputFile?: string;
 	totalTokens?: TokenUsage;
@@ -217,6 +239,14 @@ export interface ErrorInfo {
 	details?: string;
 }
 
+export interface IntercomEventBus {
+	on(channel: string, handler: (data: unknown) => void): () => void;
+	emit(channel: string, data: unknown): void;
+}
+
+export const INTERCOM_DETACH_REQUEST_EVENT = "pi-intercom:detach-request";
+export const INTERCOM_DETACH_RESPONSE_EVENT = "pi-intercom:detach-response";
+
 // ============================================================================
 // Execution Options
 // ============================================================================
@@ -224,6 +254,8 @@ export interface ErrorInfo {
 export interface RunSyncOptions {
 	cwd?: string;
 	signal?: AbortSignal;
+	allowIntercomDetach?: boolean;
+	intercomEvents?: IntercomEventBus;
 	onUpdate?: (r: import("@mariozechner/pi-agent-core").AgentToolResult<Details>) => void;
 	maxOutput?: MaxOutputConfig;
 	artifactsDir?: string;
@@ -237,6 +269,8 @@ export interface RunSyncOptions {
 	maxSubagentDepth?: number;
 	/** Override the agent's default model (format: "provider/id" or just "id") */
 	modelOverride?: string;
+	/** Registry models available for heuristic bare-model resolution */
+	availableModels?: Array<{ provider: string; id: string; fullId: string }>;
 	/** Skills to inject (overrides agent default if provided) */
 	skills?: string[];
 	/** tmux pane configuration (if enabled, run in tmux TUI mode) */
@@ -244,6 +278,12 @@ export interface RunSyncOptions {
 }
 
 export type TmuxConfig = import("./tmux-config.js").TmuxConfig;
+export type IntercomBridgeMode = "off" | "fork-only" | "always";
+
+export interface IntercomBridgeConfig {
+	mode?: IntercomBridgeMode;
+	instructionFile?: string;
+}
 
 export interface ExtensionConfig {
 	asyncByDefault?: boolean;
@@ -252,6 +292,7 @@ export interface ExtensionConfig {
 	maxSubagentDepth?: number;
 	worktreeSetupHook?: string;
 	worktreeSetupHookTimeoutMs?: number;
+	intercomBridge?: IntercomBridgeConfig;
 }
 
 // ============================================================================

@@ -22,6 +22,8 @@ Key unit test areas:
 - **Worktree** (`worktree.test.ts`): Tests conflict detection for task-level cwd overrides.
 - **Types fork preamble** (`types-fork-preamble.test.ts`): Tests `wrapForkTask` preamble wrapping and idempotency.
 - **Prompt template bridge** (`prompt-template-bridge.test.ts`): Tests bridge routing (single vs parallel).
+- **Model fallback** (`model-fallback.test.ts`): Tests candidate resolution, retryable error matching, and fallback note formatting.
+- **Intercom bridge** (`intercom-bridge.test.ts`): Tests bridge activation rules and prompt/tool injection into agent configs.
 
 ## Integration Tests
 

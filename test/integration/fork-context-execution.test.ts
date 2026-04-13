@@ -25,6 +25,7 @@ interface SessionStubOptions {
 }
 
 interface SessionManagerStub {
+	getSessionId(): string;
 	getSessionFile(): string | undefined;
 	getLeafId(): string | null;
 	createBranchedSession(leafId: string): string;
@@ -34,6 +35,7 @@ function makeSessionManagerRecorder(options: SessionStubOptions = {}) {
 	const calls: string[] = [];
 	let counter = 0;
 	const manager: SessionManagerStub = {
+		getSessionId: () => "session-123",
 		getSessionFile: () => options.sessionFile,
 		getLeafId: () => (options.leafId === undefined ? "leaf-current" : options.leafId),
 		createBranchedSession: (leafId: string) => {
@@ -87,8 +89,15 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 	});
 
 	function makeExecutor() {
+		let sessionName: string | undefined;
 		return createSubagentExecutor({
-			pi: { events: { emit: () => {} } },
+			pi: {
+				events: { emit: () => {} },
+				getSessionName: () => sessionName,
+				setSessionName: (name: string) => {
+					sessionName = name;
+				},
+			},
 			state: makeState(tempDir),
 			config: {},
 			asyncByDefault: false,
@@ -149,6 +158,7 @@ describe("fork context execution wiring", { skip: !available ? "subagent executo
 	it("returns a tool error (instead of throwing) when branch creation fails", async () => {
 		const executor = makeExecutor();
 		const manager = {
+			getSessionId: () => "session-123",
 			getSessionFile: () => "/tmp/parent.jsonl",
 			getLeafId: () => "leaf-fail",
 			createBranchedSession: () => {

@@ -6,7 +6,7 @@ Agents are markdown files with YAML frontmatter that define specialized AI confi
 
 An `AgentConfig` (defined in [[agents.ts]]) captures the parsed state of an agent file.
 
-Fields: `name`, `description`, `model`, `thinking`, `tools`, `mcpDirectTools`, `systemPrompt`, `skills`, `extensions`, `output`, `defaultReads`, `defaultProgress`, and `source`. The `source` field is one of `"builtin"`, `"user"`, or `"project"`.
+Fields include `name`, `description`, `model`, `fallbackModels`, `thinking`, `tools`, `mcpDirectTools`, `systemPrompt`, `skills`, `extensions`, `output`, `defaultReads`, `defaultProgress`, `interactive`, `maxSubagentDepth`, and `source`. The `source` field is one of `"builtin"`, `"user"`, or `"project"`.
 
 ## Agent Scopes
 
@@ -15,8 +15,8 @@ Agents exist in three scopes with priority order (project wins on name collision
 | Scope | Path |
 |-------|------|
 | Builtin | `~/.pi/agent/extensions/subagent/agents/` |
-| User | `~/.pi/agent/agents/{name}.md` |
-| Project | `.pi/agents/{name}.md` (walks up directory tree) |
+| User | `~/.pi/agent/agents/{name}.md` and `~/.agents/{name}.md` |
+| Project | `.pi/agents/{name}.md` or `.agents/{name}.md` (walks up directory tree) |
 
 Scope resolution is implemented in [[agent-scope.ts]] and [[agent-selection.ts#mergeAgentsForScope]]. The `agentScope` parameter (default `"both"`) controls which scopes are searched.
 
@@ -54,6 +54,12 @@ The `extensions` frontmatter field controls which extensions load in the subagen
 
 When `extensions` is present, it takes precedence over `mcp:` tool entries for extension loading.
 
+## Fallback Models
+
+Agents can declare `fallbackModels` as a comma-separated list of backup models in frontmatter.
+
+At runtime, [[execution.ts]] builds a deduplicated candidate list from `model` + `fallbackModels`, then retries only on provider/model availability failures detected by [[model-fallback.ts#isRetryableModelFailure]].
+
 ## Thinking Level
 
 The `thinking` frontmatter field accepts: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`.
@@ -72,4 +78,4 @@ These are handled by [[agent-management.ts#handleManagementAction]]. Management 
 
 ## Agent Serializer
 
-[[agent-serializer.ts]] converts an `AgentConfig` back to markdown with YAML frontmatter. The constant `KNOWN_FIELDS` lists recognized frontmatter keys so unknown fields round-trip as `extraFields`.
+[[agent-serializer.ts]] converts an `AgentConfig` back to markdown with YAML frontmatter. The constant `KNOWN_FIELDS` now includes execution-related fields like `fallbackModels`, `interactive`, and `maxSubagentDepth`, while unknown fields round-trip as `extraFields`.

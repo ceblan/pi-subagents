@@ -50,3 +50,38 @@ Inspect code
 		assert.equal(scout?.maxSubagentDepth, 1);
 	});
 });
+
+describe("agent frontmatter fallbackModels", () => {
+	it("serializes fallbackModels into agent frontmatter", () => {
+		const agent: AgentConfig = {
+			name: "worker",
+			description: "Worker",
+			systemPrompt: "Do work",
+			source: "project",
+			filePath: "/tmp/worker.md",
+			fallbackModels: ["openai/gpt-5-mini", "anthropic/claude-sonnet-4"],
+		};
+
+		const serialized = serializeAgent(agent);
+		assert.match(serialized, /fallbackModels: openai\/gpt-5-mini, anthropic\/claude-sonnet-4/);
+	});
+
+	it("parses fallbackModels from discovered agent frontmatter", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-subagents-agent-fallback-frontmatter-"));
+		tempDirs.push(dir);
+		const agentsDir = path.join(dir, ".pi", "agents");
+		fs.mkdirSync(agentsDir, { recursive: true });
+		fs.writeFileSync(path.join(agentsDir, "worker.md"), `---
+name: worker
+description: Worker
+fallbackModels: openai/gpt-5-mini, anthropic/claude-sonnet-4
+---
+
+Do work
+`, "utf-8");
+
+		const result = discoverAgents(dir, "project");
+		const worker = result.agents.find((agent) => agent.name === "worker");
+		assert.deepEqual(worker?.fallbackModels, ["openai/gpt-5-mini", "anthropic/claude-sonnet-4"]);
+	});
+});

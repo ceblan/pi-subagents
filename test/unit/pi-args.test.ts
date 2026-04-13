@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { buildPiArgs } from "../../pi-args.ts";
+import { applyThinkingSuffix, buildPiArgs } from "../../pi-args.ts";
 
 describe("buildPiArgs session wiring", () => {
 	it("uses --session when sessionFile is provided", () => {
@@ -29,5 +29,47 @@ describe("buildPiArgs session wiring", () => {
 		assert.ok(args.includes("--session-dir"));
 		assert.ok(args.includes("/tmp/subagent-sessions"));
 		assert.ok(!args.includes("--session"));
+	});
+});
+
+describe("buildPiArgs model wiring", () => {
+	it("uses --model for provider-qualified model ids", () => {
+		const { args } = buildPiArgs({
+			baseArgs: ["-p"],
+			task: "hello",
+			sessionEnabled: false,
+			model: "openai-codex/gpt-5.4-mini",
+		});
+
+		assert.ok(args.includes("--model"));
+		assert.ok(args.includes("openai-codex/gpt-5.4-mini"));
+		assert.ok(!args.includes("--models"));
+	});
+
+	it("uses --model for bare model ids too", () => {
+		const { args } = buildPiArgs({
+			baseArgs: ["-p"],
+			task: "hello",
+			sessionEnabled: false,
+			model: "kimi-k2.5",
+		});
+
+		assert.ok(args.includes("--model"));
+		assert.ok(args.includes("kimi-k2.5"));
+		assert.ok(!args.includes("--models"));
+	});
+
+	it("preserves thinking suffixes on model args", () => {
+		const { args } = buildPiArgs({
+			baseArgs: ["-p"],
+			task: "hello",
+			sessionEnabled: false,
+			model: "openai-codex/gpt-5.4-mini",
+			thinking: "high",
+		});
+
+		assert.equal(applyThinkingSuffix("openai-codex/gpt-5.4-mini", "high"), "openai-codex/gpt-5.4-mini:high");
+		assert.ok(args.includes("--model"));
+		assert.ok(args.includes("openai-codex/gpt-5.4-mini:high"));
 	});
 });

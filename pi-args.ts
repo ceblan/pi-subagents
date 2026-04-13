@@ -51,10 +51,7 @@ export function buildPiArgs(input: BuildPiArgsInput): BuildPiArgsResult {
 
 	const modelArg = applyThinkingSuffix(input.model, input.thinking);
 	if (modelArg) {
-		// Use --models (not --model) because pi CLI silently ignores --model
-		// without a companion --provider flag. --models resolves the provider
-		// automatically via resolveModelScope. See: #8
-		args.push("--models", modelArg);
+		args.push("--model", modelArg);
 	}
 
 	const toolExtensionPaths: string[] = [];

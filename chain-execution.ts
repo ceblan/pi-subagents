@@ -68,6 +68,7 @@ function resolveModelFullId(modelName: string | undefined, availableModels: Mode
 
 	return modelName;
 }
+import { resolveModelCandidate } from "./model-fallback.ts";
 
 interface ChainExecutionDetailsInput {
 	results: SingleResult[];
@@ -195,8 +196,8 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 
 			const taskAgentConfig = input.agents.find((agent) => agent.name === task.agent);
 			const effectiveModel =
-				(task.model ? resolveModelFullId(task.model, input.availableModels) : null)
-				?? resolveModelFullId(taskAgentConfig?.model, input.availableModels);
+				(task.model ? resolveModelCandidate(task.model, input.availableModels) : null)
+				?? resolveModelCandidate(taskAgentConfig?.model, input.availableModels);
 			const maxSubagentDepth = resolveChildMaxSubagentDepth(input.maxSubagentDepth, taskAgentConfig?.maxSubagentDepth);
 
 			const taskCwd = input.worktreeSetup
@@ -221,6 +222,7 @@ async function runParallelChainTasks(input: ParallelChainRunInput): Promise<Sing
 				outputPath,
 				maxSubagentDepth,
 				modelOverride: effectiveModel,
+				availableModels: input.availableModels,
 				skills: behavior.skills === false ? [] : behavior.skills,
 				onUpdate: input.onUpdate
 					? (progressUpdate) => {
@@ -651,8 +653,8 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 			// Resolve model: TUI override (already full format) or agent's model resolved to full format
 			const effectiveModel =
 				tuiOverride?.model
-				?? (seqStep.model ? resolveModelFullId(seqStep.model, availableModels) : null)
-				?? resolveModelFullId(agentConfig.model, availableModels);
+				?? (seqStep.model ? resolveModelCandidate(seqStep.model, availableModels) : null)
+				?? resolveModelCandidate(agentConfig.model, availableModels);
 
 			// Run step
 			const outputPath = typeof behavior.output === "string"
@@ -673,6 +675,7 @@ export async function executeChain(params: ChainExecutionParams): Promise<ChainE
 				outputPath,
 				maxSubagentDepth,
 				modelOverride: effectiveModel,
+				availableModels,
 				skills: behavior.skills === false ? [] : behavior.skills,
 				onUpdate: onUpdate
 					? (p) => {

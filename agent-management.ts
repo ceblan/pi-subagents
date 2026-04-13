@@ -130,6 +130,13 @@ function modelWarning(ctx: ManagementContext, model: string | undefined): string
 	return found ? undefined : `Warning: model '${model}' is not in the current model registry.`;
 }
 
+function fallbackModelsWarning(ctx: ManagementContext, fallbackModels: string[] | undefined): string | undefined {
+	if (!fallbackModels || fallbackModels.length === 0) return undefined;
+	const available = new Set(ctx.modelRegistry.getAvailable().flatMap((m) => [`${m.provider}/${m.id}`, m.id]));
+	const missing = fallbackModels.filter((model) => !available.has(model));
+	return missing.length ? `Warning: fallback models not in the current model registry: ${missing.join(", ")}.` : undefined;
+}
+
 function skillsWarning(cwd: string, skills: string[] | undefined): string | undefined {
 	if (!skills || skills.length === 0) return undefined;
 	const available = new Set(discoverAvailableSkills(cwd).map((s) => s.name));
@@ -197,6 +204,19 @@ function applyAgentConfig(target: AgentConfig, cfg: Record<string, unknown>): st
 		if (cfg.model === false || cfg.model === "") target.model = undefined;
 		else if (typeof cfg.model === "string") target.model = cfg.model.trim() || undefined;
 		else return "config.model must be a string or false when provided.";
+	}
+	if (hasKey(cfg, "fallbackModels")) {
+		if (cfg.fallbackModels === false || cfg.fallbackModels === "") target.fallbackModels = undefined;
+		else if (typeof cfg.fallbackModels === "string") {
+			const models = parseCsv(cfg.fallbackModels);
+			target.fallbackModels = models.length ? models : undefined;
+		} else if (Array.isArray(cfg.fallbackModels)) {
+			const models = cfg.fallbackModels
+				.filter((value): value is string => typeof value === "string")
+				.map((value) => value.trim())
+				.filter(Boolean);
+			target.fallbackModels = models.length ? [...new Set(models)] : undefined;
+		} else return "config.fallbackModels must be a comma-separated string, string array, or false when provided.";
 	}
 	if (hasKey(cfg, "tools")) {
 		if (cfg.tools === false || cfg.tools === "") { target.tools = undefined; target.mcpDirectTools = undefined; }
@@ -292,6 +312,7 @@ export function formatAgentDetail(agent: AgentConfig): string {
 	const tools = [...(agent.tools ?? []), ...(agent.mcpDirectTools ?? []).map((t) => `mcp:${t}`)];
 	const lines: string[] = [`Agent: ${agent.name} (${agent.source})`, `Path: ${agent.filePath}`, `Description: ${agent.description}`];
 	if (agent.model) lines.push(`Model: ${agent.model}`);
+	if (agent.fallbackModels?.length) lines.push(`Fallback models: ${agent.fallbackModels.join(", ")}`);
 	if (tools.length) lines.push(`Tools: ${tools.join(", ")}`);
 	if (agent.skills?.length) lines.push(`Skills: ${agent.skills.join(", ")}`);
 	if (agent.extensions !== undefined) lines.push(`Extensions: ${agent.extensions.length ? agent.extensions.join(", ") : "(none)"}`);
@@ -395,6 +416,8 @@ export function handleCreate(params: ManagementParams, ctx: ManagementContext): 
 	if (applyError) return result(applyError, true);
 	const mw = modelWarning(ctx, agent.model);
 	if (mw) warnings.push(mw);
+	const fmw = fallbackModelsWarning(ctx, agent.fallbackModels);
+	if (fmw) warnings.push(fmw);
 	const sw = skillsWarning(ctx.cwd, agent.skills);
 	if (sw) warnings.push(sw);
 	fs.writeFileSync(targetPath, serializeAgent(agent), "utf-8");
@@ -430,6 +453,10 @@ export function handleUpdate(params: ManagementParams, ctx: ManagementContext): 
 		if (hasKey(cfg, "model")) {
 			const mw = modelWarning(ctx, updated.model);
 			if (mw) warnings.push(mw);
+		}
+		if (hasKey(cfg, "fallbackModels")) {
+			const fmw = fallbackModelsWarning(ctx, updated.fallbackModels);
+			if (fmw) warnings.push(fmw);
 		}
 		if (hasKey(cfg, "skills")) {
 			const sw = skillsWarning(ctx.cwd, updated.skills);

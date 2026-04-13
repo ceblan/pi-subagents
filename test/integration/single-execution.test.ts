@@ -27,10 +27,33 @@ import {
 // Top-level await: try importing pi-dependent modules
 const execution = await tryImport<any>("./execution.ts");
 const utils = await tryImport<any>("./utils.ts");
+const types = await tryImport<any>("./types.ts");
 const available = !!(execution && utils);
 
 const runSync = execution?.runSync;
 const getFinalOutput = utils?.getFinalOutput;
+const INTERCOM_DETACH_REQUEST_EVENT = types?.INTERCOM_DETACH_REQUEST_EVENT ?? "pi-intercom:detach-request";
+const INTERCOM_DETACH_RESPONSE_EVENT = types?.INTERCOM_DETACH_RESPONSE_EVENT ?? "pi-intercom:detach-response";
+
+function createEventBus() {
+	const listeners = new Map<string, Set<(payload: unknown) => void>>();
+	return {
+		on(channel: string, handler: (payload: unknown) => void) {
+			const channelListeners = listeners.get(channel) ?? new Set();
+			channelListeners.add(handler);
+			listeners.set(channel, channelListeners);
+			return () => {
+				channelListeners.delete(handler);
+				if (channelListeners.size === 0) listeners.delete(channel);
+			};
+		},
+		emit(channel: string, payload: unknown) {
+			for (const handler of listeners.get(channel) ?? []) {
+				handler(payload);
+			}
+		},
+	};
+}
 
 describe("single sync execution", { skip: !available ? "pi packages not available" : undefined }, () => {
 	let tempDir: string;
@@ -132,6 +155,59 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		assert.equal(result.usage.turns, 1);
 		assert.equal(result.usage.input, 100); // from mock
 		assert.equal(result.usage.output, 50); // from mock
+	});
+
+	it("retries with fallback models on retryable provider failures", async () => {
+		mockPi.onCall({
+			jsonl: [{
+				type: "message_end",
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "temporary provider failure" }],
+					model: "openai/gpt-5-mini",
+					errorMessage: "rate limit exceeded",
+					usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, cost: { total: 0.01 } },
+				},
+			}],
+			exitCode: 1,
+		});
+		mockPi.onCall({ output: "Recovered on fallback" });
+		const agents = [makeAgent("echo", {
+			model: "openai/gpt-5-mini",
+			fallbackModels: ["anthropic/claude-sonnet-4"],
+		})];
+
+		const result = await runSync(tempDir, agents, "echo", "Task", {
+			runId: "fallback-sync",
+		});
+
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.model, "anthropic/claude-sonnet-4");
+		assert.deepEqual(result.attemptedModels, ["openai/gpt-5-mini", "anthropic/claude-sonnet-4"]);
+		assert.equal(result.modelAttempts?.length, 2);
+		assert.equal(result.modelAttempts?.[0]?.success, false);
+		assert.equal(result.modelAttempts?.[1]?.success, true);
+		assert.equal(result.usage.turns, 2);
+		assert.equal(mockPi.callCount(), 2);
+	});
+
+	it("does not retry on ordinary task/tool failures", async () => {
+		mockPi.onCall({
+			jsonl: [events.toolResult("bash", "process exited with code 127")],
+			exitCode: 0,
+		});
+		const agents = [makeAgent("echo", {
+			model: "openai/gpt-5-mini",
+			fallbackModels: ["anthropic/claude-sonnet-4"],
+		})];
+
+		const result = await runSync(tempDir, agents, "echo", "Task", {
+			runId: "no-fallback-task-failure",
+		});
+
+		assert.equal(result.exitCode, 127);
+		assert.equal(result.modelAttempts?.length, 1);
+		assert.equal(mockPi.callCount(), 1);
 	});
 
 	it("tracks progress during execution", async () => {
@@ -265,6 +341,41 @@ describe("single sync execution", { skip: !available ? "pi packages not availabl
 		// proving the abort signal terminated the process early.
 		assert.ok(elapsed < 5000, `should abort early, took ${elapsed}ms`);
 		// Exit code is platform-dependent (Windows: often 1 or 0, Linux: null/143)
+	});
+
+	it("detaches cleanly on intercom handoff without aborting the child process", async () => {
+		const eventBus = createEventBus();
+		let accepted = false;
+		eventBus.on(INTERCOM_DETACH_RESPONSE_EVENT, (payload) => {
+			if (!payload || typeof payload !== "object") return;
+			accepted = (payload as { accepted?: unknown }).accepted === true;
+		});
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [events.toolStart("intercom", { action: "ask", to: "orchestrator" })] },
+				{ delay: 1000, jsonl: [events.assistantMessage("received pong")] },
+			],
+		});
+		const agents = makeAgentConfigs(["echo"]);
+
+		const runPromise = runSync(tempDir, agents, "echo", "Task", {
+			runId: "intercom-detach",
+			allowIntercomDetach: true,
+			intercomEvents: eventBus,
+		});
+
+		setTimeout(() => {
+			eventBus.emit(INTERCOM_DETACH_REQUEST_EVENT, { requestId: "test-request" });
+		}, 100);
+
+		const result = await runPromise;
+
+		assert.equal(result.exitCode, 0);
+		assert.equal(result.detached, true);
+		assert.equal(result.detachedReason, "intercom coordination");
+		assert.equal(result.finalOutput, "Detached for intercom coordination.");
+		assert.equal(result.progress?.status, "detached");
+		assert.equal(accepted, true);
 	});
 
 	it("handles stderr without exit code as info (not error)", async () => {

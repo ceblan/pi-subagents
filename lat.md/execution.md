@@ -12,7 +12,7 @@ Three modes dispatched from [[subagent-executor.ts#createSubagentExecutor]]:
 
 ## Process Spawning
 
-`runSync` in [[execution.ts]] spawns a child pi process via [[pi-spawn.ts#getPiSpawnCommand]].
+`runSync` in [[execution.ts]] resolves the target agent once, then each attempt (headless or tmux) reuses that same `AgentConfig` while spawning a child pi process via [[pi-spawn.ts#getPiSpawnCommand]].
 
 Arguments are built by [[pi-args.ts#buildPiArgs]] which translates agent config and runtime overrides into pi CLI flags: `--model`, `--system-prompt`, `--tools`, `--skill`, `--session`, `--no-extensions`, `--extension`, and others. Skill content is injected into the system prompt string before spawning — not as a separate CLI flag.
 
@@ -70,9 +70,19 @@ When `tmuxConfig.enabled` is true and the process runs inside tmux, subagents la
 
 When `idleTimeoutMs > 0`, [[tmux.ts#waitForPaneExitOrIdle]] monitors the session JSONL file's mtime. If the file is unchanged for the timeout period and the last message is `role=assistant` without tool calls (checked by [[tmux.ts#isAgentIdleInSessionFile]]), the agent is considered idle and the pane is closed.
 
-## Model Override
+## Model Override and Fallback
 
 Runtime `model` overrides are processed by `applyThinkingSuffix` in [[pi-args.ts]] which merges any thinking-level suffix. The agent's `thinking` field is only applied if the model has no existing suffix.
+
+`runSync` builds candidate models using [[model-fallback.ts#buildModelCandidates]] from `modelOverride ?? agent.model` plus `agent.fallbackModels`, and records attempt metadata (`attemptedModels`, `modelAttempts`) in `SingleResult`.
+
+Retries only happen for retryable provider/model failures matched by [[model-fallback.ts#isRetryableModelFailure]]; ordinary task/tool failures do not trigger model failover.
+
+## Intercom Bridge Detach
+
+When intercom bridge orchestration is active, a running single-agent attempt can detach instead of being hard-killed if an intercom handoff is requested mid-run.
+
+`execution.ts` listens for `pi-intercom:detach-request` / `pi-intercom:detach-response` events (from [[types.ts]]) and marks results as `detached` with `detachedReason="intercom coordination"` when accepted.
 
 ## Worktree Isolation
 

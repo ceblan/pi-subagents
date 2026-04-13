@@ -15,3 +15,4 @@ Each file below documents a distinct aspect of the pi-subagents architecture.
 - [[ui]] — Agents Manager overlay, chain clarify TUI, text editor, result rendering, and slash commands
 - [[artifacts]] — Per-run artifact files, configuration, and cleanup
 - [[tests]] — Unit, integration, and e2e test suites and test support infrastructure
+- [[journals]] — Daily session journals capturing prompts, tool usage, and notable debugging work
