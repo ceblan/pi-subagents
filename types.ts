@@ -1,5 +1,5 @@
 /**
- * Type definitions for the subagent extension
+ * Type definitions for the subagents extension
  */
 
 import * as os from "node:os";
